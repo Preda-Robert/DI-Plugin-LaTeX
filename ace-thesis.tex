@@ -1,0 +1,47 @@
+\documentclass[a4paper]{ace-thesis}
+\makeindex[columns=2, title=Index alfabetic, intoc]
+
+\begin{document}
+	% set the numbering style to roman style
+	% for the first part of the documentation
+	\pagenumbering{roman}
+	
+	\input{ace-coverpage}
+	\input{ace-firstpage}
+	\input{ace-dedication}
+	\input{ace-originality}
+	\input{ace-project-timetable}
+	\input{ace-supervisor-remarks}
+	\input{ace-summary}
+	\input{ace-summary-alt}
+	\input{ace-acknowledegment}
+	\input{ace-foreword}
+	
+	\tableofcontents
+	\listoffigures
+	\addcontentsline{toc}{chapter}{\listfigurename}
+	\listoftables
+	\addcontentsline{toc}{chapter}{\listtablename}
+%	\addcontentsline{toc}{chapter}{\lstlistlistingname}
+%	\listofalgorithms
+
+	% set the numbering style to arabic style
+	% for the rest of the documentation
+	\pagenumbering{arabic}
+	
+	\input{ace-chap01}
+	\input{ace-chap02}
+	\input{ace-chap03}
+	\input{ace-chap04}
+	% ... the rest of chapters
+	\input{ace-conclusions}
+	
+	%------------------------------------------------
+	\bibliographystyle{IEEEtran}
+	\bibliography{ace-bibtex}
+	\input{ace-sourcecode}
+	\input{ace-proj-website}
+	\input{ace-media-support}
+	\printindex
+	\input{ace-lastpage}
+\end{document}
