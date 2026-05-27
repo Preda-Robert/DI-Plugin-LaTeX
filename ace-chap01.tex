@@ -1,21 +1,51 @@
-\chapter[Introducere]{Introducere}
+\selectlanguage{english}
+\chapter[Introduction]{Introduction}
 \label{chap1:intro}
-~\index{introducere}
-%\addcontentsline{toc}{chapter}{Introducere}
-\begin{chapquote}{Proverb popular}
-„Învățătura este o comoară care își urmează stăpânul pretutindeni.”
+\begin{chapquote}{Martin Fowler}
+``Dependency injection is a useful technique for making the coupling between components more flexible.''
 \end{chapquote}
 
-\section[Scopul]{Scopul lucrării}
+\section{Purpose of the work}
 \label{chap1:purpose}
-Primul capitol al lucrării este binențeles cel de introducere a cititorului în tema lucrării.  
 
-De exemplu, acest document a fost creat cu scopul de a ajuta studenții Facultății de Automatică, Calculatoare și Electronică a Universității din Craiova să își redacteze propriul proiect~\index{proiect} de diplomă~\index{diplomă}/disertație~\index{disertație} folosind limbajul \LaTeX. Acest șablon~\index{șablon} poate fi folosit de oricine respectând principiile declarate în Capitolul~\ref{chap3:terms}. 
+This thesis documents the design and implementation of a \textbf{Visual Studio Code extension} that assists C\# developers working with \texttt{Microsoft.Extensions.DependencyInjection}. The extension, referred to in the repository as the \emph{Dependency Injection Plugin} (\texttt{di-plugin}), closes a gap between compile-time type checking and the manual work of wiring services in a composition root (\texttt{Program.cs}, \texttt{Startup}, or a dedicated \texttt{CompositionRoot} class).
 
-\section[Motivația alegerii temei]{Motivația}
+The primary objectives are:
+\begin{itemize}
+	\item to \textbf{parse} C\# source code and extract constructor dependency graphs using a syntax-aware analyzer;
+	\item to \textbf{detect} common DI smells (concrete constructor parameters, circular dependencies within a file, missing \texttt{services.Add*} registrations);
+	\item to \textbf{suggest or generate} registration lines and optional factory classes for services with many interface dependencies;
+	\item to integrate with the VS Code editor through \textbf{diagnostics}, \textbf{commands}, and \textbf{quick fixes}.
+\end{itemize}
+
+The implementation is intentionally heuristic: it does not execute the application, load assemblies, or invoke the Roslyn compiler. Instead it combines \emph{tree-sitter} parsing for structural facts with regular-expression scanning for registration patterns found in real ASP.NET Core projects.
+
+\section{Motivation}
 \label{chap1:motivation}
-Autorul își justifică aici alegerea temei~\index{tema} și interesul său pentru domeniul~\index{domeniu} și tema alese.
 
-\section[Contextul]{Contextul actual}
+In medium and large .NET solutions, service registration is scattered across extension methods (\texttt{AddApplicationServices}), grows with each new repository or service, and is easy to leave incomplete. Developers routinely face three questions when adding a class:
+\begin{enumerate}
+	\item \emph{What} should be registered in the container?
+	\item \emph{With which lifetime} (singleton, scoped, transient)?
+	\item \emph{Should construction} use direct injection, a factory, or a builder when many dependencies are involved?
+\end{enumerate}
+
+IDE support from Visual Studio for DI is limited compared to refactoring tools for types and members. A lightweight VS Code extension that works on open workspaces---including cross-platform and \texttt{dotnet} CLI-centric workflows---can provide immediate feedback in the editor and produce copy-pasteable or insertable registration code.
+
+The sample projects shipped with the plugin (\texttt{BaseSample}, \texttt{BuilderFactorySample}, \texttt{CheckoutSample}, \texttt{MultiFactorySample}, \texttt{MealPlanner}) exist to validate analysis, suggestions, and code generation under controlled scenarios.
+
+\section{Current context}
 \label{chap1:context}
-Autorul face o prezentare generală în direcția temei alese din perspectiva contextului~\index{context} actual.
+
+\textbf{Dependency injection in .NET.} Since ASP.NET Core 2.x, the generic host builds an \texttt{IServiceProvider} from an \texttt{IServiceCollection}~\cite{ms-di}. Registrations are typically expressed as \texttt{services.AddScoped<IContract, Implementation>()}. Framework-provided services (\texttt{ILogger<T>}, \texttt{IConfiguration}, \texttt{IServiceProvider}) are registered by the host and need not appear in application code. The general pattern follows inversion-of-control containers described in the literature~\cite{fowler-di}.
+
+\textbf{Editor ecosystem.} VS Code extensions activate on language events (\texttt{onLanguage:csharp}) and expose commands, diagnostics, and code actions through the Extension API~\cite{vscode-api}. C\# language support is often provided by OmniSharp or C\# Dev Kit; this plugin complements those tools rather than replacing them.
+
+\textbf{Static analysis choice.} Full semantic analysis (Roslyn) would be more precise but heavier to deploy inside a TypeScript extension. The project uses \texttt{tree-sitter} with \texttt{tree-sitter-c-sharp} for fast, incremental-friendly parsing of constructors and class declarations, accepting known limits on file size and partial semantic knowledge.
+
+\section{Scope and structure of the document}
+\label{chap1:structure}
+
+Chapter~\ref{chap2:architecture} presents the system architecture and module decomposition. Chapter~\ref{chap3:analyzer} documents the C\# analyzer module (\texttt{analyzer.ts}). Chapter~\ref{chap4:extension} documents the extension host (\texttt{extension.ts}) and auxiliary modules for registration insertion and interface extraction. Chapter~\ref{conclusions} summarizes contributions, limitations, and future work.
+
+Out of scope for this implementation: automated refactoring of entire solutions via Roslyn, runtime verification of DI graphs, and support for third-party containers (Autofac, Ninject) beyond patterns that resemble \texttt{Microsoft.Extensions.DependencyInjection}.

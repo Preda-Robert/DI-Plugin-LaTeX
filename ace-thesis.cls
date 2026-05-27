@@ -36,6 +36,22 @@
 \usepackage{longtable}
 \usepackage{lipsum}
 \usepackage{fancyhdr}
+\usepackage{listings}
+\lstset{
+	basicstyle=\ttfamily\footnotesize,
+	breaklines=true,
+	frame=single,
+	tabsize=2,
+	showstringspaces=false,
+	columns=flexible,
+	keepspaces=true
+}
+\lstdefinelanguage{TypeScript}{
+	keywords={typeof,new,true,false,catch,function,return,null,interface,export,import,async,await,const,let},
+	sensitive=true,
+	comment=[l]{//},
+	morestring=[b]",
+}
 % Font Settings
 % 8-bits encoding, many text sym­bols (such as baht, bul­let, copy­right, mu­si­cal­note, onequar­ter, sec­tion, and yen), Latin Modern fonts
 \usepackage[T1]{fontenc}

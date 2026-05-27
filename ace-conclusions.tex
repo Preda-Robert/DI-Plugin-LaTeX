@@ -1,94 +1,30 @@
-\chapter{Concluzii}
-%\addcontentsline{toc}{chapter}{Concluzii}
-\label{conclusions}~\index{concluzii}	
-\begin{chapquote}{Martin Luther}
-„Acolo unde şcolile prosperă, totul prosperă.” 
+\selectlanguage{english}
+\chapter{Conclusions}
+\label{conclusions}
+\begin{chapquote}{Edsger W. Dijkstra}
+``Simplicity is a great virtue but it requires hard work to achieve it and education to appreciate it.''
 \end{chapquote}
 
-\begin{flushleft}
-\begin{chapquote}{David Bly}
-	„A-ţi dori să ai succes fară a munci din greu este ca şi cum ai încerca să culegi roadele pe care nu le-ai semănat vreodata.”
-\end{chapquote}	
-\end{flushleft}
+\section{Summary of contributions}
 
-Concluzia unei lucrări, fie că este integrată în capitolul de discuții, fie că este separată de acesta, ar trebui să creeze un final plin de încărcătură al lucrării, deoarece aceasta conduce către cercetări și fire de investigat, viitoare.
+This work presented a VS Code extension that assists C\# developers with \texttt{Microsoft.Extensions.DependencyInjection}. The solution combines a tree-sitter--based analyzer module with a heuristic workspace aggregator hosted in the Extension API. Together they provide constructor dependency insight, DI smell detection, registration suggestions, optional factory code generation, and composition-root insertion workflows.
 
-Elemente cheie ale concluziilor:
+The modular split---\texttt{analyzer.ts} for syntax facts, \texttt{extension.ts} for orchestration, \texttt{registrationInsert.ts} and \texttt{extractInterface.ts} for targeted edits---keeps responsibilities testable and documents a practical architecture for small language-aware IDE tools.
+
+\section{Evaluation against objectives}
+
+The sample workspaces (\texttt{BuilderFactorySample}, \texttt{CheckoutSample}, \texttt{MultiFactorySample}, \texttt{MealPlanner}) demonstrate that:
 \begin{itemize}
-	\item Rezumează cercetarea prin reformularea problemei și a scopului cercetării, oferind un răspuns succint la acestea și recapitulând principalele constatări și dovezi.
-	\item Creionează implicațiile contribuției autorului pentru teorie, practică, cercetare și/sau politici în domeniu.
-	\item Recunoaște limitele și domeniul de aplicare al rezultatelor lucrării.
-	\item Abordează următoarea frontieră: „ce urmează?” - pot fi făcute recomandări specifice pentru lucrări viitoare în domeniu: ce s-ar putea face pentru a aplica sau a continua investigația din prezenta lucrare?
+	\item factory generation activates for services with three or more interface dependencies and produces usable \texttt{*Factory.cs} templates;
+	\item registration suggestions align with composition-root lifetime conventions when a root file exists;
+	\item false positives for \texttt{IMapper}, \texttt{IServiceProvider}, and Identity managers were reduced by extended registration detection;
+	\item separating factory output from \texttt{services.Add*} suggestions avoids redundant \texttt{AppBuilder} content in the factory command.
 \end{itemize}
 
-În funcție de disciplina și etica Dvs. de muncă, ați putea include o secțiune care să ofere perspective concrete asupra procesului Dvs. de învățare și evoluție profesională, ca cercetător pe parcursul studiului.
-%, mai ales dacă ați început teza cu o anecdotă personală. 
-Păstrați capitolul de concluzie concis - poate avea o singură pagină sau doar câteva pagini dacă sunteți extrem de detaliat.
+\section{Limitations}
 
-Ca principiu general, puteți compara diferențele dintre discuții și concluzii în tabelul de mai jos (a se vedea Tab.~\ref{tab:discussions-conclusions}).
+The approach remains \textbf{heuristic and syntactic}, not a substitute for Roslyn-powered refactorings or runtime DI validation. Large C\# files exceed the tree-sitter buffer limit; cross-file concrete-type smells may persist; and empty extracted interfaces require manual completion.
 
-\begin{flushleft}
-\begin{table}
-	\caption[Diferențe între discuții și concluzii]{Diferențe între discuții și concluzii}
-	\label{tab:discussions-conclusions}
-	\begin{tabular}{|c|c|}
-		\hline
-		\begin{minipage}[c][1cm][c]{7cm}
-			\begin{center}
-				\makecell{\textbf{Discuții}}
-			\end{center}
-		\end{minipage} &
-		\begin{minipage}[c][1cm][c]{7cm}
-			\begin{center}
-				\makecell{\textbf{Concluzii}}
-			\end{center}
-		\end{minipage} \\
-		\hline
-		\begin{minipage}[l][2cm][c]{7cm}
-			\begin{center}
-				\makecell{
-					Prezintă un argument bazat pe  dovezi pentru\\ o nouă perspectivă sau soluție la problema\\ cercetării. \\}
-			\end{center}
-		\end{minipage} &
-		\begin{minipage}[l][2cm][c]{7cm}
-			\begin{center}
-				\makecell{
-					Explică de ce contează 	această nouă \\ perspectivă 
-					sau soluție, cui ar trebui \\
-					să-i pese și ce ar trebui făcut în continuare.}
-			\end{center}
-		\end{minipage} \\
-		\hline
-		\begin{minipage}[c][1cm][c]{7cm}
-			\begin{center}
-				\makecell{
-					Se concentrează pe contribuția originală \\din lucrare.}
-			\end{center}
-		\end{minipage} &
-		\begin{minipage}[c][1cm][c]{7cm}
-			\begin{center}
-				\makecell{
-					Subliniază semnificația sa socială și, ca atare,\\ oferă influența sau „impactul” cercetării.}
-			\end{center}
-		\end{minipage} \\
-		\hline
-	\end{tabular}
-\end{table}
-\end{flushleft}
+\section{Future work}
 
-\section[Strângerea ideilor]{Strângeți idei pentru concluzie}
-Ca bune practici, pe măsură ce scrieți sau editați lucrarea/teza, adunați într-un singur fișier/loc, acele idei care nu se potrivesc pe deplin scopului strict al unui capitol anterior sau ideile pe care ați dori să le dezvoltați într-un alt proiect sau lucrare. 
-
-Acestea pot oferi material proaspăt pentru capitolul de concluzii. De exemplu, pot deveni surse și argumente relative la implicațiile sociale ale cercetărilor Dvs. sau recomandări pentru investigații viitoare.
-
-\section[Alinierea concluziilor cu restul tezei]{Alinierea concluziilor cu părțile anterioare ale tezei}
-
-Introducerea și concluzia, precum și mini-introducerile și mini-concluziile capitolelor principale, formează grosul narațiunii unei teze, deoarece oferă cititorilor o perspectivă holistică asupra cercetării.
-
-Pentru a alinia secțiunea de concluzii cu restul capitolelor din lucrarea Dvs.:
-\begin{itemize}
-	\item Asigurați-vă că abordați aceeași problemă cu care ați început în secțiunea introductivă.
-	\item Dacă ați folosit o anecdotă sau un alt tip de element de referință pentru a începe introducerea, gândiți-vă să încheiați teza cu o revenire la elementul de referință.
-	\item Evaluați dacă trebuie să ajustați introducerea sau părțile anterioare ale tezei pentru a se potrivi concluziilor dvs. sau dacă concluziile în sine trebuie ajustate.
-	\item Explorați în prealabil și alte lucrări pentru a avea o gamă variată de exemple de introduceri și concluzii. În acest demers, veți citi scurte fragmente din introducere și concluzie din două teze diferite. Pe măsură ce citiți, gândiți-vă la modul în care autorul a legat sau conectat concluziile sale de introduceri. 
-\end{itemize}
+Recommended extensions include: Roslyn integration or LSP collaboration for symbol-accurate analysis; configurable factory thresholds; support for additional registration APIs; undo-friendly refactorings; unit tests over golden-file samples; and optional export of dependency graphs (e.g.\ Graphviz) for architecture reviews.

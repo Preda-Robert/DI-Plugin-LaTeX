@@ -1,83 +1,190 @@
-\chapter[Procesul de scriere al lucrării]{Cum se scrie o teză?}
-%\addcontentsline{toc}{chapter}{Procesul de scriere al tezei}
-\label{chap4}	
-\begin{chapquote}{Anatole France}
-	„Educaţia nu este despre cât de mult ai memorat, nici măcar despre câte ştii. Este capacitatea de a diferenţia între ceea ce ştii şi ceea ce nu ştii.”
+\selectlanguage{english}
+\chapter[Extension host]{VS Code extension host and auxiliary modules}
+\label{chap4:extension}
+\begin{chapquote}{Microsoft Documentation}
+``Extensions can interact with the editor through the VS Code Extension API.''
 \end{chapquote}
 
-Scrierea unei teze este un proiect pe termen lung care necesită planificare, cercetare și scriere consecventă. În capitolul~\ref{chap1:intro} o structură detaliată a fost furnizată deja. Generalizând, putem spune că orice teză constă dintr-o secvență de capitole (părți) structurate de obicei în această ordine:
-\begin{enumerate} 
-	\item introducere, 
-	\item o analiză a literaturii de specialitate, 
-	\item o metodologie a cercetării, 
-	\item o serie de rezultate obținute, 
-	\item o analiză (discuție) a „noutăților” identificate/descoperite și 
-	\item o serie de concluzii. 
-\end{enumerate}	
+\section{Purpose and responsibilities}
+\label{chap4:purpose}
 
-Pentru simplificare și o asimilare mai rapidă a organizării unei lucrări, ne putem gândi la acestea la fel cum în jocul de șah avem părțile specifice jocului:
+\texttt{extension.ts} is the \textbf{activation entry point} (\texttt{activate}/\texttt{deactivate}). It binds the analyzer to editor lifecycle events, exposes eleven contributed commands (see \texttt{package.json}), registers a \texttt{CodeActionProvider} for quick fixes, and coordinates file generation under \texttt{GeneratedDI/}.
+
+Auxiliary modules isolate edit construction:
 \begin{itemize}
-	\item \textbf{Deschidere:} Deschiderea este când toți jucătorii se încălzesc înainte de începerea jocului, iar apoi jucătorii încep să intre încet în ritmul luptei. Jocul începe și jucătorii (și piesele acestora) își ocupă pozițiile încercând să obțină avantaje poziționale.
-
-	\item \textbf{Mijlocul jocului:} Mijlocul jocului începe odată ce majoritatea pieselor minore au fost capturate (cai, nebuni, pioni etc.). Este momentul în care începi să-ți faci griji atât pentru avantajele materiale, cât și pentru cele poziționale.
-
-	\item \textbf{Sfârșitul jocului:} Nu este clar când începe jocul final, dar este atunci când mai sunt câteva piese pe tablă și încercați să câștigați (sau să închideți = concluzionați) acel joc înainte ca adversarul (de ex. ceilalți colegi din grupă) să o facă.
+	\item \texttt{registrationInsert.ts} --- find composition-root insertion points, deduplicate lines, normalize lifetimes;
+	\item \texttt{extractInterface.ts} --- multi-file \texttt{WorkspaceEdit} for extract-interface quick fixes.
 \end{itemize}
 
-Procesul implică trecerea de la o arie largă de interes la o întrebare de cercetare specifică, argumentabilă, care este apoi explorată și susținută cu dovezi. 
+\section{Key data structures and interfaces}
+\label{chap4:data-structures}
 
-Acest capitol propune un ghid de tip pas-cu-pas despre cum să vă scrieți lucrarea/teza, bazat pe cele mai bune practici academice~\cite{HarvardWritingCenter},~\cite{CompilatioHowToPhDThesis}: 
+Beyond \texttt{WorkspaceDiSummary} (Chapter~\ref{chap2:data-structures}), the host uses:
 
-\section{Pregătire și planificare} 
-\begin{itemize}
-	\item Definiți un subiect gestionabil: Alegeți un subiect care vă interesează și se încadrează în ambițiile dvs. profesionale.
-	\item Formulați problema/întrebarea: Transformați-vă interesul într-o „problemă” specifică, cercetabilă (întrebarea centrală la care răspunde teza dvs.). 
-	\item Asigurați-vă că identificați un îndrumător calificat: Alegeți-vă un coordonator științific, cu expertiză relevantă și cu care estimați că puteți avea o relație profesională bună. 
-	\item Schițați un plan detaliat: Construiți un cuprins detaliat, enumerând capitolele, secțiunile și subsecțiunile (de exemplu, până la 3-4 niveluri ierarhice). 
-	\item Înțelegeți cerințele: Consultați instrucțiunile universității dvs. privind formatarea (font, margini, spațiere), numărul de cuvinte și termenele limită de depunere~\cite{efron10tips},~\cite{CompilatioHowToUnivThesis}. 
-\end{itemize}
+\begin{table}[htbp]
+\centering
+\caption{Host-specific structures}
+\label{tab:host-types}
+\begin{tabular}{|l|p{8.8cm}|}
+\hline
+\textbf{Symbol} & \textbf{Role} \\
+\hline
+\texttt{WorkspaceCSharpFile} & Pair of \texttt{TextDocument} and source string. \\
+\hline
+\texttt{GeneratedFile} & \texttt{fileName} + generated C\# content for disk write. \\
+\hline
+\texttt{RegistrationInsertTarget} & URI, \texttt{insertPosition}, indentation, human label (\texttt{CompositionRoot}, etc.). \\
+\hline
+\texttt{MARKER\_SERVICE\_INTERFACES} & Exclude \texttt{IDisposable}, \texttt{ICloneable}, \ldots{} from interface$\rightarrow$impl suggestions. \\
+\hline
+\texttt{DiCodeActionProvider} & Implements \texttt{provideCodeActions} for DI diagnostics. \\
+\hline
+\end{tabular}
+\end{table}
 
-\section[Cercetare și colectare de date]{Cercetare și colectare de date}
-\begin{itemize}
-	\item Realizați o analiză a literaturii de specialitate: Citiți pe larg pentru a înțelege stadiul actual al cercetării și pentru a identifica o „lacună” pe care studiul dvs. o va umple. 
-	\item Organizați referințele bibliografice, respectiv cele web/online: Folosiți un manager de referințe (de exemplu, BibTeX~\footnote{https://www.bibtex.org/}, Zotero~\footnote{https://www.zotero.org/}, Mendeley~\footnote{https://www.mendeley.com/}, EndNote~\footnote{https://endnote.com/}) de la început pentru a gestiona citările și a evita plagiatul. 
-	\item Executați procesul de investigație/cercetare: Colectați date primare sau secundare folosind metode riguroase din punct de vedere științific~\cite{OxfordWritingTips}. 
-\end{itemize}
+\section{Workspace aggregation algorithm}
+\label{chap4:workspace-algo}
 
-\section[Procesul de scriere]{Procesul de scriere} 
-\begin{itemize}
-	\item Începeți cu structura: În loc să scrieți de la prima pagină, începeți cu secțiuni mai ușoare, tehnice, cum ar fi metodologia sau analiza literaturii de specialitate. 
-	\item Adoptați o mentalitate de „scrieți pe parcurs”: Redactați părți din teză în timpul cercetării, în loc să așteptați să le scrieți pe toate la sfârșit. 
-	\item Abordarea „ciornă brută”: Concentrați-vă pe obținerea ideilor pe pagină, nu pe perfecționarea lor inițială.
-	\item Mențineți concentrarea în analiza literaturii de specialitate: Nu enumerați doar sursele; analizați-le critic și sintetizați-le pentru a vă justifica cercetarea. 
-	\item Separarea rezultatelor de discuții: Secțiunea Rezultate prezintă observații factuale (figuri/tabele). Secțiunea Discuții interpretează aceste rezultate și le conectează la imaginea de ansamblu. 
-	\item Scrieți Introducerea/Rezumatul la sfârșit: Chiar dacă acestea apar primele, este cel mai bine să fie scrise la urmă pentru a reflecta cu exactitate conținutul finalizat al cercetării dumneavoastră. 
-\end{itemize}
-
- 
-
-\section[Structurarea unei teze standard]{Structurarea unei teze standard}
+\texttt{buildWorkspaceSummary()} performs:
 \begin{enumerate}
-	\item Pagina de titlu: Titlu, nume, îndrumător, instituție și dată. 
-	\item Rezumat: Un rezumat de 300-500 de cuvinte al întregii teze. Opțional, poate fi adăugat un rezumat într-o limbă de circulație internațională precum engleza.
-	\item Introducere: Stabilește contextul, problema de cercetare, întrebările și planul/schița de idei. 
-	\item Recenzie a literaturii: Evaluează cercetările existente și identifică lacunele. 
-	\item Metodologie: Explică modul în care ați efectuat cercetarea. 
-	\item Rezultate: Prezintă concluziile într-un mod logic, neinterpretat. 
-	\item Discuție: Analizează și interpretează rezultatele, discutând implicațiile. 
-	\item Concluzie: Rezumează concluziile cheie și răspunde la întrebarea de cercetare. 
-	\item Referințe/Bibliografie: O listă completă a tuturor surselor citate. 
-	\item Anexe: Materiale suplimentare (de exemplu, transcrieri ale interviurilor, date brute, URL-uri, link-uri GitHub, etc.)~\cite{HowToThesisWritingTips}. 
-	\item Indexul alfabetic: marcați în text locațiile cuvintelor cheie pe care doriți să le identificați pentru a le putea regăsi ulterior într-un mod facil și consolidat.
+	\item Load up to 200 \texttt{.cs} files; skip unreadable paths.
+	\item Per file: run \texttt{analyzeCSharp}; merge constructors; extend \texttt{registeredTypes} via \texttt{collectExtendedRegistrationTypes}.
+	\item Detect \texttt{aspNetMvcHost} when \texttt{WebApplication.CreateBuilder} or \texttt{AddControllers*} appears.
+	\item Build \texttt{interfaceToImpl} via \texttt{collectInterfaceImplementations} (regex on \texttt{public class Impl : IFace}).
+	\item Mark \texttt{nonInjectableClassNames} for classes inheriting \texttt{Profile}, \texttt{Migration}, \texttt{Controller}, etc.
+	\item Record namespaces and \texttt{CompositionRoot} presence.
 \end{enumerate}
 
-\section[Finalizarea lucrării și alte sfaturi utile]{Finalizarea lucrării și alte sfaturi utile}
+\texttt{collectExtendedRegistrationTypes} extends plain \texttt{Add*} scanning with:
+\begin{itemize}
+	\item \texttt{AddDbContext<T>} $\rightarrow$ \texttt{T}, \texttt{DbContextOptions<T>};
+	\item \texttt{AddAutoMapper(...)} $\rightarrow$ \texttt{IMapper};
+	\item \texttt{AddIdentity<TUser,TRole>} / \texttt{AddIdentityCore<TUser>} $\rightarrow$ Identity managers;
+	\item \texttt{AddRoles}/\texttt{AddRoleManager} $\rightarrow$ \texttt{RoleManager<T>};
+	\item \texttt{typeof(I)} , \texttt{typeof(Impl)} pairs in \texttt{ServiceDescriptor} style registrations.
+\end{itemize}
+
+\section{Extension commands and workflows}
+\label{chap4:commands}
+
+Table~\ref{tab:commands} maps user commands to workflows.
+
+\begin{table}[htbp]
+\centering
+\caption{Contributed commands and workflows}
+\label{tab:commands}
+\small
+\begin{tabular}{|p{4.1cm}|p{8.6cm}|}
+\hline
+\textbf{Command} & \textbf{Workflow} \\
+\hline
+\texttt{analyzeFile} & Resolve active/visible C\# document $\rightarrow$ \texttt{analyzeCSharp} $\rightarrow$ Output report + refresh diagnostics. \\
+\hline
+\texttt{suggestRegistrations} & File-scoped \texttt{buildRegistrationSuggestions} (interface pairs + concrete types). \\
+\hline
+\texttt{analyzeWorkspace} & \texttt{buildWorkspaceSummary} $\rightarrow$ list missing registrations (cross-file) and constructors by file. \\
+\hline
+\texttt{suggestWorkspaceRegistrations} & \texttt{buildWorkspaceRegistrationSuggestions} with lifetime from composition root. \\
+\hline
+\texttt{suggestFactories} & File-level factory snippets; fallback to workspace factory list if empty. \\
+\hline
+\texttt{suggestWorkspaceFactories} & \texttt{buildWorkspaceFactorySuggestions} (factory \texttt{.cs} only, no \texttt{AppBuilder} dump). \\
+\hline
+\texttt{generateWorkspaceFactories} & Write \texttt{GeneratedDI/*Factory.cs} + \texttt{AppBuilder.cs}. \\
+\hline
+\texttt{insertWorkspaceRegistrations} & Suggest lines $\rightarrow$ \texttt{insertRegistrationsIntoWorkspace}. \\
+\hline
+\texttt{mergeGeneratedIntoCompositionRoot} & Parse \texttt{GeneratedDI/AppBuilder.cs} $\rightarrow$ insert into composition root. \\
+\hline
+\end{tabular}
+\end{table}
+
+\textbf{Internal commands} (not in palette, invoked from code actions): \texttt{insertRegistrationForType}, \texttt{extractInterfaceAndRegister}.
+
+\subsection{Registration suggestion logic}
+
+\texttt{buildWorkspaceRegistrationSuggestions} emits:
+\begin{itemize}
+	\item \texttt{services.Add\{Lifetime\}<IInterface, Impl>()} for unregistered interface keys;
+	\item \texttt{services.Add\{Lifetime\}<Concrete>()} for classes with constructors that are not factory targets, not already registered, and not excluded by MVC/test/non-injectable rules.
+\end{itemize}
+
+\texttt{preferredLifetimeForWorkspace} chooses \texttt{Scoped}, \texttt{Transient}, or \texttt{Singleton} from existing \texttt{services.Add*} usage in the composition root, else ASP.NET $\rightarrow$ Scoped, else Transient.
+
+\subsection{Factory generation logic}
+
+\texttt{shouldGenerateFactory} requires:
+\[
+|\text{parameters}| \geq 3 \quad \land \quad \forall p.\; \texttt{interfaceToImpl.has}(p.\text{type})
+\]
+
+\texttt{buildFactoryFileContent} emits a sealed class with \texttt{IServiceProvider} and \texttt{Create()} calling \texttt{GetRequiredService<T>()} for each dependency.
+
+\texttt{buildAppBuilderFileContent} rules (refined):
+\begin{itemize}
+	\item Register \textbf{factory types only}, not the concrete service when a factory exists;
+	\item Include interface$\rightarrow$implementation lines required by factory dependencies even if already registered elsewhere (standalone \texttt{AppBuilder} completeness);
+	\item Skip marker interfaces and non-injectable classes.
+\end{itemize}
+
+\subsection{Registration insert module (\texttt{registrationInsert.ts})}
+
+\texttt{findRegistrationInsertTarget} priority:
 \begin{enumerate}
-	\item Corectură temeinică: Verificați gramatica, ortografia și coerența. Cititul cu voce tare sau utilizarea unei copii pe hârtie poate ajuta la depistarea erorilor. 
-	\item Asigurați o formatare corectă: Asigurați-vă că toate citările, referințele și marginile respectă cerințele instituției dumneavoastră. 
-	\item Faceți copii de rezervă ale tuturor documentelor/datelor/informațiilor: Faceți frecvent copii de rezervă ale lucrărilor în mai multe locații (de exemplu, pe hard disk local, în spațiul de stocare din cloud)~\cite{ThesisWritingTips}. 
-	\item Scrieți regulat: Stabiliți un program (de exemplu, scrieți zilnic, chiar și pentru doar 30 de minute).
-	\item Nu vizați perfecțiunea: Perfecționismul provoacă întârzieri; acceptați faptul că primele versiuni pot fi imperfecte. 
-	\item Folosiți elemente vizuale: Folosiți imagini, grafice și tabele pentru a descrie și vizualiza rezultatele. 
-	\item Luați pauze: Preveniți epuizarea făcând pauze între sesiunile de editare~\cite{HowToWritePhDThesis}. Dictonul \textit{„pauzele lungi și dese, cheia marilor succese!”} ascunde și un dram de adevăr pe lângă evidenta acrimonie.
+	\item File containing \texttt{class CompositionRoot};
+	\item \texttt{public static IServiceCollection Add*Services(...)};
+	\item \texttt{void ConfigureServices(IServiceCollection services)}.
 \end{enumerate}
+
+Insertion occurs at the \textbf{start of the line} containing \texttt{return services.BuildServiceProvider()} (or \texttt{return services;}), preserving indentation. \texttt{filterNewRegistrationLines} avoids duplicate substrings in normalized source.
+
+\subsection{Extract interface module (\texttt{extractInterface.ts})}
+
+Workflow for \texttt{extractInterfaceAndRegister}:
+\begin{enumerate}
+	\item Derive \texttt{I\{Concrete\}} name; locate implementation file.
+	\item Create interface file in \texttt{Interfaces/} folder if present, else beside implementation.
+	\item Append interface to class bases; replace constructor parameter type in consumer class.
+	\item Insert \texttt{services.AddScoped<I, Concrete>()} via \texttt{insertRegistrationsIntoWorkspace}.
+\end{enumerate}
+
+\section{Diagnostics and quick fixes}
+\label{chap4:diagnostics}
+
+\texttt{analyzeCSharpDocument} maps analyzer output to \texttt{Diagnostic} entries (source \texttt{di-plugin}):
+\begin{itemize}
+	\item Information/hint on constructors with dependency lists;
+	\item Warning on concrete types, cycles, file-local missing registrations;
+	\item File-level parse limit warnings at range \texttt{(0,0)}.
+\end{itemize}
+
+\texttt{DiCodeActionProvider} offers:
+\begin{itemize}
+	\item local \texttt{ConfigureServices} insert when pattern matches;
+	\item workspace insert command for missing types;
+	\item register \texttt{I*} $\rightarrow$ concrete or full extract-interface workflow.
+\end{itemize}
+
+\section{Heuristics and design decisions}
+\label{chap4:heuristics}
+
+\begin{itemize}
+	\item \textbf{Regex + AST hybrid:} AST for constructors; regex for registrations and inheritance (pragmatic for ASP.NET extension methods).
+	\item \textbf{Marker interfaces excluded:} \texttt{IDisposable} on \texttt{UnitOfWork} must not produce \texttt{AddScoped<IDisposable, ...>}.
+	\item \textbf{Non-injectable bases:} AutoMapper \texttt{Profile}, EF \texttt{Migration}, MVC controllers excluded from concrete registration suggestions.
+	\item \textbf{Implicit framework services:} \texttt{IServiceProvider}, \texttt{ILogger<T>}, \texttt{IOptions<T>}, etc. excluded from workspace missing-registration reports.
+	\item \textbf{Factory vs.\ registration separation:} reduces duplicate output between command categories (user-facing clarity).
+\end{itemize}
+
+\section{Known limitations}
+\label{chap4:limitations}
+
+\begin{itemize}
+	\item \textbf{200-file workspace cap} may truncate very large solutions.
+	\item \textbf{Interface detection} requires \texttt{I[A-Z]} prefix on base types; custom naming (\texttt{Abstractions.IEmail}) is missed.
+	\item \textbf{Extract interface} creates empty interfaces; members are not copied from implementation.
+	\item \textbf{Lifetime inference} is majority-vote on existing lines, not architecture-aware.
+	\item \textbf{Merge/suggest} may still propose \texttt{JobScheduler}-style simple services while factories target complex ones---by design.
+	\item \textbf{No undo grouping} for multi-file extract-interface edits beyond VS Code default \texttt{WorkspaceEdit} behavior.
+	\item Commands \texttt{insertRegistrationForType} and \texttt{extractInterfaceAndRegister} are not listed in \texttt{package.json} contributes (palette) but are valid command IDs for code actions.
+\end{itemize}

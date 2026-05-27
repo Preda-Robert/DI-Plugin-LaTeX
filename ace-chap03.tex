@@ -1,17 +1,129 @@
-\chapter[Termeni de utilizare]{Termeni de utilizare}
-%\addcontentsline{toc}{chapter}{Termeni de utilizare}
-\label{chap3:terms}	
-\begin{chapquote}{Edmondo De Amicis}
-	„Educaţia unui popor se judecă după ţinuta de pe stradă. Văzând grosolănia pe stradă ești sigur că o vei găși şi în casă.” 
+\selectlanguage{english}
+\chapter[C\# analyzer module]{C\# analyzer module (\texttt{analyzer.ts})}
+\label{chap3:analyzer}
+\begin{chapquote}{Alfred V. Aho}
+``A parser generator is a tool for constructing compilers; the syntax tree is the central representation.''
 \end{chapquote}
 
-\section[Autorii]{Autorii}
-\label{chap3:author}
-Acest șablon de document a fost creat de Marius Marian pentru colectivul Facultății de Automatică, Calculatoare și Electronică a Universității din Craiova și pentru uniformizarea formei și structurii proiectelor de diplomă/disertație ale propriilor săi studenți.
+\section{Purpose and responsibilities}
+\label{chap3:purpose}
 
-\section[Licența de utilizare]{Licența de utilizare}
-\label{chap3:use-licence}
-\begin{chapquote}{Esop}
-	„Exemplul este cea mai bună învățătură.”
-\end{chapquote}
-Nu există restricții de utilizare. Documentul nu este constrâns de nicio licență. Sugestiile de îmbunătățire pot fi adresate autorului pe adresa de e-mail: marius.marian@edu.ucv.ro.
+The analyzer module is a \textbf{pure, VS Code--agnostic} TypeScript library. Its sole responsibility is to accept a C\# source string and return a \texttt{CSharpDiAnalysis} object describing:
+\begin{itemize}
+	\item all constructors found in \texttt{class\_declaration} nodes;
+	\item parameters with textual type names and source offsets;
+	\item file-local warnings: concrete-type parameters, circular constructor dependencies among classes \emph{defined in the same file}, and constructor parameters whose types do not appear in \texttt{Add*} registration lines \emph{in that same file}.
+\end{itemize}
+
+It does not read the workspace, apply quick fixes, or generate code. The extension host calls \texttt{analyzeCSharp()} from diagnostics, commands, and workspace aggregation.
+
+\section{Key data structures and interfaces}
+\label{chap3:data-structures}
+
+Table~\ref{tab:analyzer-types} lists exported types.
+
+\begin{table}[htbp]
+\centering
+\caption{Exported interfaces in \texttt{analyzer.ts}}
+\label{tab:analyzer-types}
+\begin{tabular}{|l|p{8.8cm}|}
+\hline
+\textbf{Type} & \textbf{Meaning} \\
+\hline
+\texttt{ConstructorParam} & Parameter \texttt{type}, \texttt{name}, \texttt{startIndex}, \texttt{endIndex} in UTF-16/byte-aligned tree-sitter indices. \\
+\hline
+\texttt{ConstructorInfo} & Owning \texttt{className}, parameter list, constructor span. \\
+\hline
+\texttt{ConcreteTypeIssue} & Parameter whose type is a \texttt{class} in-file but not an \texttt{interface} in-file. \\
+\hline
+\texttt{CircularDependencyIssue} & Directed cycle among in-file classes via constructor parameter types. \\
+\hline
+\texttt{MissingRegistrationIssue} & Parameter type not listed in file-local \texttt{Add*} scan. \\
+\hline
+\texttt{CSharpDiAnalysis} & Aggregate of constructors, \texttt{errors}, and three issue arrays. \\
+\hline
+\end{tabular}
+\end{table}
+
+The parser and grammar are module singletons:
+\begin{lstlisting}[caption={Parser initialization (\texttt{analyzer.ts})}]
+const parser = new Parser();
+parser.setLanguage(CSharp);
+\end{lstlisting}
+
+\section{Algorithms and analysis logic}
+\label{chap3:algorithms}
+
+\subsection{Parse guard and error handling}
+
+Before parsing, the module enforces \texttt{MAX\_PARSE\_SOURCE\_LENGTH = 32767} because the \texttt{node-tree-sitter} binding rejects larger buffers with \texttt{EINVAL} (``Invalid argument''). Files such as Entity Framework \texttt{DataContextModelSnapshot.cs} skip AST analysis and return an error string while the host continues workspace-level regex analysis.
+
+Parse exceptions are caught and converted to \texttt{errors[]} messages; the host never crashes on a single bad file.
+
+\subsection{Constructor extraction}
+
+Algorithm steps:
+\begin{enumerate}
+	\item Obtain \texttt{class\_declaration} nodes via \texttt{descendantsOfType} (with manual fallback traversal).
+	\item For each class, collect \texttt{constructor\_declaration} nodes.
+	\item For each parameter list, read \texttt{parameter} or \texttt{\_parameter\_array} named children.
+	\item Resolve type text via \texttt{findTypeOfParameter}: prefer \texttt{childForFieldName("type")}, else first identifier-like child before the name field.
+\end{enumerate}
+
+Primary constructors and unusual parameter syntax may be missed if the grammar node types differ from classic \texttt{parameter} nodes.
+
+\subsection{Concrete-type detection}
+
+For each constructor parameter type \(t\):
+\begin{itemize}
+	\item if \(t\) appears in the in-file \texttt{classes} set and not in the in-file \texttt{interfaces} set, emit \texttt{ConcreteTypeIssue}.
+\end{itemize}
+
+This is intentionally \textbf{file-local}: a parameter typed as \texttt{SmtpEmailSender} is flagged even if \texttt{IEmailSender} exists elsewhere in the solution.
+
+\subsection{Circular dependency detection}
+
+Build a directed graph: nodes are class names in the file; edge \(A \rightarrow B\) exists if \(B\) is the type of some constructor parameter of class \(A\) and \(B\) is also a class in the file. Run DFS cycle detection; deduplicate cycles by sorted node keys. Report one representative cycle per equivalence class.
+
+This detects \emph{structural} cycles resolvable only by constructors in the same compilation unit---not runtime cycles involving interfaces registered only in other files.
+
+\subsection{Missing registration detection (file scope)}
+
+Scan the file for:
+\begin{lstlisting}[caption={Registration regex (file-local)}]
+/Add(?:Singleton|Scoped|Transient)\s*<([^>]+)>/g
+\end{lstlisting}
+Collect type names from generic arguments (split on comma). Flag each non-primitive parameter type absent from that set.
+
+\textbf{Note:} Workspace-level missing-registration analysis in \texttt{extension.ts} uses \texttt{collectExtendedRegistrationTypes} across all files and implicit framework types; the analyzer's missing-registration issue is strictly \emph{per-file}.
+
+\section{Extension commands using the analyzer}
+\label{chap3:commands}
+
+The analyzer has no commands of its own. The host invokes it as follows:
+\begin{itemize}
+	\item \textbf{Continuous diagnostics} --- \texttt{analyzeCSharpDocument} on open/change for C\# documents.
+	\item \textbf{DI: Analyze current file} --- prints constructors and issues to the Output channel.
+	\item \textbf{Workspace aggregation} --- \texttt{buildWorkspaceSummary} calls \texttt{analyzeCSharp} per file (subject to size limit).
+\end{itemize}
+
+\section{Heuristics and design decisions}
+\label{chap3:heuristics}
+
+\begin{itemize}
+	\item \textbf{Tree-sitter over Roslyn:} smaller deployment, works on raw text; trades away symbol resolution.
+	\item \textbf{In-file class/interface sets:} fast concrete-type and cycle checks without a solution-wide symbol table.
+	\item \textbf{Primitive filter:} \texttt{string}, \texttt{int}, etc. are excluded from missing-registration warnings.
+	\item \textbf{Offset preservation:} parameter and constructor spans enable precise diagnostic underlines and quick-fix ranges.
+\end{itemize}
+
+\section{Known limitations}
+\label{chap3:limitations}
+
+\begin{itemize}
+	\item \textbf{32 KiB parse ceiling} --- large generated migrations are skipped for AST features.
+	\item \textbf{No cross-file semantics} --- interface implementation in another file does not suppress concrete-type warnings in the consumer file.
+	\item \textbf{Regex registration in analyzer} --- does not understand \texttt{AddAutoMapper}, \texttt{AddDbContext}, or \texttt{AddIdentityCore}; those are handled only at workspace level in \texttt{extension.ts}.
+	\item \textbf{Parameter type resolution} --- complex attributes, \texttt{ref}/\texttt{out}, and tuple types may yield incomplete type strings (\texttt{?}).
+	\item \textbf{Parse error nodes} --- \texttt{hasError} on the tree yields a generic warning; partial recovery is not attempted.
+\end{itemize}
