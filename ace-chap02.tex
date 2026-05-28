@@ -8,93 +8,155 @@
 \section{Purpose and responsibilities}
 \label{chap2:purpose}
 
-The plugin is structured as a \textbf{thin VS Code host} (\texttt{extension.ts}) orchestrating analysis, workspace aggregation, user commands, and editor integrations, plus \textbf{specialized modules} for reusable algorithms. Table~\ref{tab:modules} summarizes module responsibilities.
+The DI Plugin is organized as a \textbf{layered architecture} with a single entry point in the VS Code extension host and stateless analysis libraries beneath it. At the highest level, the system exists to transform \emph{raw C\# text} in a workspace into \emph{actionable DI artifacts}: diagnostic messages, textual suggestions in the Output channel, generated files under \texttt{GeneratedDI/}, and transactional edits applied through \texttt{WorkspaceEdit}.
+
+The host layer owns all user interaction: command registration, progress messaging, file system writes, and subscription to document lifecycle events. The analyzer layer owns syntax-tree traversal and file-local issue detection. Auxiliary modules own specialized edit algorithms that would otherwise clutter \texttt{extension.ts}. Table~\ref{tab:modules} summarizes module responsibilities; each row corresponds to a deployable compilation unit in the TypeScript project.
 
 \begin{table}[htbp]
 \centering
 \caption{Software modules and responsibilities}
 \label{tab:modules}
-\begin{tabular}{|l|p{9.5cm}|}
+\begin{tabular}{|l|p{9.2cm}|}
 \hline
 \textbf{Module} & \textbf{Responsibilities} \\
 \hline
-\texttt{src/csharp/analyzer.ts} & Parse C\# with tree-sitter; extract constructors; detect file-local DI issues. \\
+\texttt{src/csharp/analyzer.ts} & Parse C\# with tree-sitter; extract constructors and parameter types; detect file-local concrete-type, cycle, and missing-registration issues; enforce parse size guard. \\
 \hline
-\texttt{src/extension.ts} & Activate extension; workspace summary; commands; diagnostics; code actions; code generation. \\
+\texttt{src/extension.ts} & \texttt{activate}/\texttt{deactivate}; build \texttt{WorkspaceDiSummary}; register commands, diagnostics, code actions; factory and AppBuilder generation; orchestrate insert/merge. \\
 \hline
-\texttt{src/registrationInsert.ts} & Locate composition-root insertion points; merge \texttt{services.Add*} lines; parse generated \texttt{AppBuilder.cs}. \\
+\texttt{src/registrationInsert.ts} & Locate composition-root insertion points; deduplicate registration lines; parse \texttt{GeneratedDI/AppBuilder.cs}; normalize lifetimes for insert. \\
 \hline
-\texttt{src/extractInterface.ts} & Build workspace edits for ``extract interface and register'' quick fixes. \\
+\texttt{src/extractInterface.ts} & Multi-file workspace edit for ``extract interface and register'' quick fixes on concrete constructor parameters. \\
 \hline
-\texttt{package.json} & Command contributions, activation events, dependency manifest. \\
+\texttt{package.json} & Command contributions, activation events (\texttt{onLanguage:csharp}), engine version, native dependency manifest. \\
+\hline
+\texttt{sample/*} & Validation workspaces documented in Chapter~\ref{chap5:evaluation}. \\
 \hline
 \end{tabular}
 \end{table}
 
-At runtime, all analysis flows \emph{from text buffers} (open documents and workspace files) to \emph{structured summaries} (\texttt{WorkspaceDiSummary}) and then to \emph{user-visible artifacts} (Output channel text, diagnostics, \texttt{WorkspaceEdit}, files under \texttt{GeneratedDI/}).
+\subsection{Separation of concerns}
+
+Keeping \texttt{analyzeCSharp(source: string)} free of VS Code imports allows the analyzer to be unit-tested in Node (future work) and reasoned about independently of editor APIs. The host never embeds tree-sitter node-walking logic inline; it always delegates to \texttt{analyzeCSharp}. Conversely, the analyzer never calls \texttt{vscode.workspace.findFiles} because file discovery policy (200-file cap, exclude globs) is a host concern.
+
+\subsection{Runtime data flow}
+
+At runtime, all analysis flows \emph{from text buffers} (open documents and workspace files) to \emph{structured summaries} (\texttt{WorkspaceDiSummary}) and then to \emph{user-visible artifacts}. No background language server process is spawned; each command invocation may re-scan the workspace synchronously. For typical sample sizes ($<$20 files), latency is imperceptible; for MealPlanner-scale folders, regex passes dominate cost on skipped mega-files.
 
 \section{Key data structures (cross-cutting)}
 \label{chap2:data-structures}
 
-The host defines \texttt{WorkspaceDiSummary}, the central aggregate built by \texttt{buildWorkspaceSummary()}:
+The host defines \texttt{WorkspaceDiSummary}, the central aggregate produced by \texttt{buildWorkspaceSummary()}. Understanding this structure is prerequisite to reading both the analyzer chapter and the command workflows in Chapter~\ref{chap4:extension}.
+
+\subsection{WorkspaceDiSummary fields}
+
 \begin{itemize}
-	\item \texttt{files} --- opened C\# documents with source text;
-	\item \texttt{constructors} --- \texttt{ConstructorInfo} enriched with \texttt{fileName} and \texttt{relativePath};
-	\item \texttt{registeredTypes} --- types inferred from \texttt{AddSingleton|Scoped|Transient}, \texttt{AddDbContext}, \texttt{AddAutoMapper}, Identity APIs, etc.;
-	\item \texttt{interfaceToImpl} --- map from interface name to implementing class names (regex on \texttt{class X : IY});
-	\item \texttt{typeToNamespace} --- simple name to namespace for generated usings;
-	\item \texttt{hasCompositionRoot}, \texttt{aspNetMvcHost}, \texttt{genericClassNames}, \texttt{nonInjectableClassNames} --- feature flags and exclusion sets.
+	\item \texttt{files: WorkspaceCSharpFile[]} --- documents loaded for the current operation, each with URI and full text snapshot.
+	\item \texttt{constructors: ConstructorInfo[]} --- all constructors discovered in scanned files, enriched with \texttt{fileName} and \texttt{relativePath} for reporting.
+	\item \texttt{registeredTypes: Set<string>} --- type names considered ``already registered'' in the workspace, populated by \texttt{collectExtendedRegistrationTypes} on every file.
+	\item \texttt{interfaceToImpl: Map<string, string[]>} --- maps interface simple name to one or more implementing class names, built by regex on inheritance clauses.
+	\item \texttt{typeToNamespace: Map<string, string>} --- simple type name to namespace for generating \texttt{using} directives in \texttt{AppBuilder.cs}.
+	\item \texttt{hasCompositionRoot: boolean} --- true if any file contains \texttt{class CompositionRoot}.
+	\item \texttt{aspNetMvcHost: boolean} --- true if \texttt{WebApplication.CreateBuilder} or \texttt{AddControllers*} appears, biasing lifetime toward \texttt{Scoped}.
+	\item \texttt{genericClassNames: Set<string>} --- classes declared with type parameters, often excluded from naive concrete registration.
+	\item \texttt{nonInjectableClassNames: Set<string>} --- classes inheriting \texttt{Profile}, \texttt{Migration}, \texttt{Controller}, etc., excluded from suggestions.
 \end{itemize}
 
-The analyzer exports \texttt{CSharpDiAnalysis}, the per-file result consumed by diagnostics and file-scoped commands. Detailed field definitions appear in Chapter~\ref{chap3:analyzer}.
+\subsection{Per-file analysis aggregate}
+
+The analyzer exports \texttt{CSharpDiAnalysis}, the per-file counterpart consumed when refreshing diagnostics on the active editor. Fields include \texttt{constructors}, \texttt{concreteTypeIssues}, \texttt{circularDependencyIssues}, \texttt{missingRegistrationIssues}, and \texttt{errors} (parse guard or exception messages). Chapter~\ref{chap3:analyzer} defines each issue type algorithmically.
+
+\subsection{Generated and insert artifacts}
+
+\texttt{GeneratedFile} pairs a file name with C\# content for writing to \texttt{GeneratedDI/}. \texttt{RegistrationInsertTarget} records where \texttt{registrationInsert.ts} will place new lines: document URI, zero-based \texttt{insertPosition}, indentation string, and human-readable label (\texttt{CompositionRoot}, \texttt{AddApplicationServices}, etc.).
 
 \section{Processing pipeline}
 \label{chap2:pipeline}
 
-Figure~\ref{fig:pipeline} describes the end-to-end flow for workspace-level features.
+Figure~\ref{fig:pipeline} summarizes the end-to-end pipeline for workspace-level features. Each stage is idempotent: re-running a command rebuilds the summary from current disk content rather than caching stale ASTs between commands (simplicity over incremental performance).
 
 \begin{figure}[htbp]
 \centering
 \fbox{\parbox{0.92\textwidth}{
 \small
-\textbf{1. Discovery.} \texttt{findFiles("**/*.cs")} excluding \texttt{bin/}, \texttt{obj/}, \texttt{node\_modules/}.\\
-\textbf{2. Per-file parse.} \texttt{analyzeCSharp(source)} $\rightarrow$ constructors and file-local issues (if $\leq$ 32\,KiB).\\
-\textbf{3. Regex passes.} Registrations, interface implementations, ASP.NET host detection, non-injectable bases.\\
-\textbf{4. Aggregation.} Merge into \texttt{WorkspaceDiSummary}.\\
-\textbf{5. Presentation.} Commands write to Output channel; \texttt{generate} writes \texttt{GeneratedDI/}; \texttt{insert/merge} apply \texttt{WorkspaceEdit}.
+\textbf{1. Discovery.} \texttt{findFiles("**/*.cs")} with exclusion of \texttt{bin/}, \texttt{obj/}, \texttt{node\_modules/}, \texttt{.git/}; cap 200 files.\\
+\textbf{2. Per-file parse.} \texttt{analyzeCSharp(source)} $\rightarrow$ constructors and file-local issues if length $\leq$ 32\,767 characters; else record error and skip AST.\\
+\textbf{3. Regex passes.} On every file: extended registration types, interface implementations, host detection, non-injectable bases, namespace extraction.\\
+\textbf{4. Aggregation.} Merge into \texttt{WorkspaceDiSummary}; compute missing types vs.\ constructor parameters workspace-wide.\\
+\textbf{5. Presentation.} Commands format text to Output channel; \texttt{generate} writes disk; \texttt{insert/merge} build \texttt{WorkspaceEdit} and apply.
 }}
 \caption{Workspace analysis pipeline}
 \label{fig:pipeline}
 \end{figure}
 
+\subsection{Diagnostic pipeline (editor-bound)}
+
+Separately from workspace commands, opening or editing a C\# document triggers \texttt{analyzeCSharpDocument}, which:
+\begin{enumerate}
+	\item reads the document text from the editor buffer;
+	\item calls \texttt{analyzeCSharp};
+	\item maps issues to \texttt{vscode.Diagnostic} objects with ranges derived from tree-sitter byte/character indices;
+	\item updates a \texttt{DiagnosticCollection} named for the extension.
+\end{enumerate}
+
+This path must remain lightweight because it runs on every keystroke debounced by VS Code's diagnostic request scheduling.
+
 \section{Technology stack and integration points}
 \label{chap2:tech}
 
+\subsection{Runtime and build}
+
+The extension is authored in TypeScript, compiled to JavaScript under \texttt{out/}, and packaged per VS Code extension guidelines. Native module \texttt{tree-sitter} binds to a platform-specific binary; packaging must include prebuilds or instruct developers to rebuild for their architecture.
+
+\subsection{Parsing stack}
+
+\texttt{tree-sitter} provides incremental parsing infrastructure; \texttt{tree-sitter-c-sharp} supplies the grammar. The analyzer holds a module-level \texttt{Parser} instance with language set once at load time. Parse trees are not retained between calls---each analysis parses from scratch, which simplifies memory management at the cost of repeated work.
+
+\subsection{Editor API surface}
+
+The host uses:
 \begin{itemize}
-	\item \textbf{Runtime:} Node.js; TypeScript compiled to \texttt{out/extension.js}.
-	\item \textbf{Parsing:} \texttt{tree-sitter} native binding + \texttt{tree-sitter-c-sharp} grammar~\cite{tree-sitter,tree-sitter-csharp}.
-	\item \textbf{Editor API:} VS Code Extension API~\cite{vscode-api} --- \texttt{commands}, \texttt{languages.createDiagnosticCollection}, \texttt{registerCodeActionsProvider}, \texttt{workspace.applyEdit}, \texttt{workspace.fs}.
-	\item \textbf{Target DI API:} \texttt{Microsoft.Extensions.DependencyInjection} registration idioms only.
+	\item \texttt{vscode.commands.registerCommand} for palette actions;
+	\item \texttt{vscode.languages.createDiagnosticCollection} for Problems panel integration;
+	\item \texttt{vscode.languages.registerCodeActionsProvider} for lightbulb quick fixes;
+	\item \texttt{vscode.workspace.applyEdit} and \texttt{vscode.workspace.fs.writeFile} for mutations;
+	\item \texttt{vscode.window.createOutputChannel} for human-readable reports.
 \end{itemize}
 
-Activation occurs on \texttt{onLanguage:csharp}. Subscriptions include document open/change/close handlers that refresh diagnostics for C\# buffers.
+Activation occurs on \texttt{onLanguage:csharp}. Subscriptions include \texttt{onDidOpenTextDocument}, \texttt{onDidChangeTextDocument}, and \texttt{onDidCloseTextDocument} filtered to C\# language ID.
 
 \section{Design principles}
 \label{chap2:design}
 
-\begin{itemize}
-	\item \textbf{Fail soft on parse errors.} Large files and native parse failures return empty constructor lists with warning messages instead of crashing the extension host.
-	\item \textbf{Separate registration from factory concerns.} Suggest/generate commands for factories output \texttt{*Factory.cs} snippets only; \texttt{services.Add*} lines are produced by registration commands (Chapter~\ref{chap4:extension}).
-	\item \textbf{Conservative factory rule.} Factories are generated only when a constructor has at least three parameters and each parameter type is a known interface key in \texttt{interfaceToImpl}.
-	\item \textbf{Composition-root-first insertion.} Automated edits target \texttt{CompositionRoot}, \texttt{Add*Services} extension methods, or \texttt{ConfigureServices}, not arbitrary files.
-\end{itemize}
+\subsection{Fail soft on parse errors}
+
+Large files and native parse failures must never crash the extension host process. MealPlanner's Entity Framework snapshot demonstrated that a single \texttt{EINVAL} from tree-sitter aborted \emph{all} commands before guards were added. The architectural rule is: \textbf{degrade per file}, continue workspace regex passes, surface a single diagnostic at document start when AST is skipped.
+
+\subsection{Separate registration from factory concerns}
+
+Users confused ``suggest factories'' with full \texttt{AppBuilder} dumps identical to registration output. The architecture now routes factory commands through \texttt{buildWorkspaceFactorySuggestions}, emitting \texttt{*Factory.cs} snippets only, while registration commands own \texttt{services.Add*} lines. Generated \texttt{AppBuilder.cs} remains a merge artifact for users who want a standalone composition checklist.
+
+\subsection{Conservative factory rule}
+
+Factories are generated only when a constructor has at least three parameters and each parameter type is a key in \texttt{interfaceToImpl}. This rule is easy to explain in documentation and test with negative-control classes (two parameters). More sophisticated rules (cyclomatic complexity, team thresholds) are left to future configuration.
+
+\subsection{Composition-root-first insertion}
+
+Automated edits target recognizable anchors---\texttt{CompositionRoot}, \texttt{Add*Services} extension methods, or \texttt{ConfigureServices}---rather than arbitrary files. Insertion occurs at the start of the line containing \texttt{return services.BuildServiceProvider()} to preserve formatting and avoid splitting tokens.
+
+\subsection{Explainable heuristics over opaque ML}
+
+Every suggestion can be traced to a named function (\texttt{shouldGenerateFactory}, \texttt{isImplicitFrameworkDependency}). This supports thesis evaluation and academic scrutiny: behavior is reproducible from source, not learned from corpus.
 
 \section{Known limitations (system level)}
 \label{chap2:limitations}
 
 \begin{itemize}
-	\item No Roslyn semantic model: generic constraints, \texttt{using} aliases, and partial classes across files may be misclassified.
-	\item Workspace scan capped at 200 \texttt{.cs} files per operation.
-	\item Heuristic registration detection cannot model every third-party DI extension method.
-	\item Generated code is a starting point; lifetimes and architectural boundaries remain the developer's responsibility.
+	\item \textbf{No Roslyn semantic model} --- generic constraints, \texttt{using} aliases, \texttt{partial} classes split across files, and explicit interface implementation may be misclassified.
+	\item \textbf{Workspace scan cap} --- at most 200 \texttt{.cs} files per operation; larger solutions may omit tail files alphabetically unless the cap is raised.
+	\item \textbf{Regex registration detection} --- cannot model every third-party DI fluent API; only patterns resembling Microsoft.Extensions.DependencyInjection and common ASP.NET extensions are recognized.
+	\item \textbf{Generated code is advisory} --- lifetimes, bounded contexts, and thread-safety remain developer responsibilities; the plugin does not prove correctness.
+	\item \textbf{Manual validation only} --- Chapter~\ref{chap5:evaluation} documents sample-based tests; no continuous integration golden files ship with the thesis artifact.
 \end{itemize}
+
+Despite these limits, the architecture demonstrates how a small, testable decomposition can deliver useful DI assistance in a mainstream editor without enterprise compiler infrastructure.

@@ -1,0 +1,397 @@
+\selectlanguage{english}
+\chapter[Evaluation]{Evaluation, sample workspaces, and test results}
+\label{chap5:evaluation}
+\begin{chapquote}{Barry W. Boehm}
+``Validation is the process of checking whether the software product satisfies the real needs of the customer.''
+\end{chapquote}
+
+\section{Purpose and evaluation strategy}
+\label{chap5:purpose}
+
+Because the DI Plugin does not ship a separate automated test harness inside the VS Code extension host, validation relies on \textbf{reproducible manual scenarios} encoded as sample workspaces in the repository (\texttt{sample/}). Each sample is a small C\# solution opened as the VS Code workspace root; commands are invoked from the Command Palette and results are compared against documented expectations in \texttt{SAMPLES.md} and per-sample \texttt{README.md} files.
+
+This chapter records:
+\begin{itemize}
+	\item the \textbf{test environment} and procedure;
+	\item the \textbf{domain model} and intentional gaps in each sample;
+	\item \textbf{command-by-command outcomes} for registration, factory, merge, and analysis features;
+	\item \textbf{regression cases} discovered during development (parse limits, false positives, insert-position bugs).
+\end{itemize}
+
+The evaluation does not claim statistical coverage of all C\# programs; it demonstrates \emph{representative} behaviors that a thesis reader can replicate by installing the extension and opening the same folders.
+
+\section{Test environment and procedure}
+\label{chap5:environment}
+
+\subsection{Hardware and software}
+
+Tests were performed on a Windows~10/11 workstation with Visual Studio Code (or Cursor, API-compatible) and the extension loaded from the development workspace (\texttt{F5} launch or \texttt{vsce package} install). The extension targets:
+\begin{itemize}
+	\item \textbf{Node.js} runtime bundled with VS Code;
+	\item \textbf{tree-sitter} native module for C\# parsing;
+	\item \textbf{.NET SDK} 9.x for building sample console and web projects where applicable.
+\end{itemize}
+
+\subsection{Standard test procedure}
+
+For each sample folder \(S\):
+\begin{enumerate}
+	\item Open \(S\) as the sole workspace root (\texttt{File $\rightarrow$ Open Folder}).
+	\item Wait for C\# language activation (\texttt{onLanguage:csharp}).
+	\item Run \textbf{DI: Analyze workspace} and capture the Output channel report.
+	\item Run \textbf{DI: Suggest registrations for workspace} and note suggested \texttt{services.Add*} lines.
+	\item Run \textbf{DI: Suggest factories for workspace} and verify factory class names only (no full \texttt{AppBuilder} dump in suggest mode).
+	\item Optionally run \textbf{DI: Generate builders/factories files (workspace)} and inspect \texttt{GeneratedDI/}.
+	\item Optionally run \textbf{DI: Merge GeneratedDI into CompositionRoot} on samples that define \texttt{CompositionRoot} or \texttt{Add*Services}.
+	\item Open Problem panel: confirm diagnostics on constructors, concrete types, and parse-limit warnings where expected.
+\end{enumerate}
+
+\subsection{Pass/fail criteria}
+
+A scenario \textbf{passes} when:
+\begin{itemize}
+	\item the command completes without host exception (notably no \texttt{EINVAL} / ``Invalid argument'' from tree-sitter);
+	\item suggested types match the intentional missing registrations in the sample;
+	\item factory suggestions appear \emph{only} for classes with \(\geq 3\) constructor parameters whose types are known interface keys in \texttt{interfaceToImpl};
+	\item framework types (\texttt{IServiceProvider}, \texttt{IMapper}, Identity managers) do \emph{not} appear as missing registrations after extended scanning;
+	\item merge/insert edits land inside the composition root without corrupting the \texttt{return} statement line.
+\end{itemize}
+
+\section{Overview of sample workspaces}
+\label{chap5:overview}
+
+Table~\ref{tab:samples-overview} summarizes all validation workspaces and their primary stress target.
+
+\begin{table}[htbp]
+\centering
+\caption{Sample workspaces and validation focus}
+\label{tab:samples-overview}
+\small
+\begin{tabular}{|l|l|p{7.2cm}|}
+\hline
+\textbf{Sample} & \textbf{Size} & \textbf{Primary validation focus} \\
+\hline
+\texttt{BaseSample} & 7 \texttt{.cs} files & Green-field registration suggestions; no composition root \\
+\hline
+\texttt{BuilderFactorySample} & $\sim$15 files & Factory for 4-dep service; concrete-type smell; merge \\
+\hline
+\texttt{CheckoutSample} & $\sim$12 files & Factory vs.\ 2-dep service; partial \texttt{CompositionRoot} \\
+\hline
+\texttt{MultiFactorySample} & $\sim$12 files & Two factories in one workspace; \texttt{JobScheduler} negative \\
+\hline
+\texttt{MealPlanner} & 100+ \texttt{.cs} & Real ASP.NET API; \texttt{AddAutoMapper}; EF snapshot size \\
+\hline
+\texttt{EventPlanner} & Medium web app & Identity, \texttt{ServiceDescriptor} registration style \\
+\hline
+\end{tabular}
+\end{table}
+
+\section{BaseSample: registration from scratch}
+\label{chap5:basesample}
+
+\subsection{Domain and intentional state}
+
+\texttt{BaseSample} models a minimal console application (\texttt{DemoApp}) with service types (\texttt{Processor}, \texttt{HelloMessageService}, \texttt{ConsoleLogger}) and interfaces (\texttt{IProcessor}, \texttt{IMessageService}, \texttt{ILogger}) but \textbf{no} \texttt{IServiceCollection} wiring in \texttt{Program.cs}. The comment in source explicitly marks this as a target for the plugin: developers should discover missing bindings without a composition root file.
+
+\subsection{Tests performed}
+
+\begin{itemize}
+	\item \textbf{DI: Analyze current file} on \texttt{Processor.cs} --- lists constructor parameters and file-local issues.
+	\item \textbf{DI: Suggest registrations for current file} --- proposes \texttt{Add*} pairs for interfaces implemented in-file.
+	\item \textbf{DI: Analyze workspace} --- aggregates constructors; reports missing interface implementations workspace-wide.
+	\item \textbf{DI: Suggest registrations for workspace} --- emits lines such as \texttt{services.AddTransient<IProcessor, Processor>()} (lifetime defaults to \texttt{Transient} when no ASP.NET host pattern is detected).
+\end{itemize}
+
+\subsection{Results}
+
+The workspace analysis correctly identifies that \texttt{Processor} depends on \texttt{ILogger} and \texttt{IMessageService} while no \texttt{AddSingleton|Scoped|Transient} lines exist anywhere in the workspace. Registration suggestions include interface-to-implementation pairs for all discovered \texttt{class X : IX} relationships. Because there is no \texttt{CompositionRoot}, commands \texttt{insertWorkspaceRegistrations} and \texttt{mergeGeneratedIntoCompositionRoot} either prompt the user to select a target file or report that no insertion anchor was found---expected behavior documented for green-field projects.
+
+\textbf{Outcome:} Pass. The sample validates that the plugin provides value \emph{before} the developer creates a composition root, acting as a checklist rather than only a merge assistant.
+
+\subsection{Representative types in BaseSample}
+
+\texttt{Processor} depends on \texttt{ILogger} and \texttt{IMessageService}; \texttt{ConsoleLogger} implements \texttt{ILogger}; \texttt{HelloMessageService} implements \texttt{IMessageService}. \texttt{Program.cs} contains no \texttt{ServiceCollection}:
+
+\begin{lstlisting}[caption={BaseSample Program.cs (excerpt)}]
+static void Main(string[] args)
+{
+    // No DI setup — plugin should handle this
+    Console.WriteLine("App started");
+}
+\end{lstlisting}
+
+Workspace suggest therefore lists multiple \texttt{AddTransient} or \texttt{AddScoped} lines (lifetime defaults to \texttt{Transient} when no web host is detected). This validates end-to-end interface map construction without a composition root anchor for insert commands.
+
+\section{BuilderFactorySample: factories, smells, and merge}
+\label{chap5:builder}
+
+\subsection{Domain and intentional state}
+
+\texttt{BuilderFactorySample} (\texttt{ShopApp} namespace) contains:
+\begin{itemize}
+	\item \texttt{OrderNotificationService} --- four interface dependencies (\texttt{ILogger}, \texttt{ITemplateEngine}, \texttt{IEmailSender}, \texttt{IClock}), satisfying the factory threshold;
+	\item \texttt{ConcreteMailerService} --- constructor takes concrete \texttt{SmtpEmailSender}, exercising the \textbf{concrete-type} diagnostic;
+	\item \texttt{CompositionRoot} --- partial wiring: \texttt{ILogger}, \texttt{IClock}, \texttt{ITemplateEngine} registered; \texttt{IEmailSender} and \texttt{OrderNotificationService} deliberately omitted.
+\end{itemize}
+
+\subsection{Factory suggestion and generation}
+
+\textbf{Command:} \texttt{DI: Suggest factories for workspace}.
+
+\textbf{Expected:} Output contains a \texttt{OrderNotificationServiceFactory} class using \texttt{IServiceProvider.GetRequiredService<T>()} for each of the four interfaces, not a duplicate listing of every \texttt{services.Add*} line (factory command is factory-only after UX refinement).
+
+\textbf{Observed:} Factory snippet names all four dependencies; no factory is proposed for \texttt{ConcreteMailerService} (only one parameter, and concrete type).
+
+\textbf{Command:} \texttt{DI: Generate builders/factories files (workspace)}.
+
+\textbf{Expected:} Files under \texttt{GeneratedDI/}: \texttt{OrderNotificationServiceFactory.cs}, \texttt{AppBuilder.cs} registering the factory and dependency interfaces required for standalone compilation.
+
+\textbf{Outcome:} Pass for factory detection and file emission.
+
+\subsection{Registration suggestions and lifetime}
+
+\textbf{Command:} \texttt{DI: Suggest registrations for workspace}.
+
+\textbf{Expected:} Missing \texttt{IEmailSender} mapping and registration for \texttt{OrderNotificationService} (or its factory, depending on generation strategy). Lifetime should match existing \texttt{AddScoped} lines in \texttt{CompositionRoot} $\rightarrow$ \texttt{Scoped}.
+
+\textbf{Observed:} Suggestions use \texttt{AddScoped}; pairing for \texttt{SmtpEmailSender} prefers \texttt{IEmailSender} when the interface exists in the workspace map.
+
+\subsection{Concrete-type diagnostic}
+
+Opening \texttt{Services.cs} shows a warning on the \texttt{SmtpEmailSender} parameter of \texttt{ConcreteMailerService}. Quick fix \textbf{Extract interface and register} creates \texttt{ISmtpEmailSender} (or equivalent) and offers workspace registration insert---validating the \texttt{extractInterface.ts} path.
+
+\textbf{Outcome:} Pass.
+
+\subsection{Merge into composition root}
+
+\textbf{Command:} \texttt{DI: Merge GeneratedDI into CompositionRoot} after generation.
+
+\textbf{Expected:} New \texttt{services.AddScoped<...>} lines appear above \texttt{return services.BuildServiceProvider();} without splitting the \texttt{return} keyword across lines (regression fix: insert at \textbf{line start}, not at the \texttt{return} token).
+
+\textbf{Observed:} After the insert-position fix, merge succeeds; duplicate lines are filtered when the same registration substring already exists.
+
+\textbf{Outcome:} Pass (post-fix).
+
+\section{CheckoutSample: factory positive and negative control}
+\label{chap5:checkout}
+
+\subsection{Domain and intentional state}
+
+\texttt{CheckoutSample} simulates e-commerce checkout:
+\begin{itemize}
+	\item \texttt{CheckoutCoordinator} --- four interfaces: \texttt{IPaymentGateway}, \texttt{IInventoryService}, \texttt{IPricingEngine}, \texttt{INotificationService};
+	\item \texttt{PaymentCaptureService} --- \textbf{two} dependencies (\texttt{IPaymentGateway}, \texttt{IAuditLog}) as a \textbf{negative control} for factory generation;
+	\item \texttt{CompositionRoot} --- only inventory, pricing, and audit implementations registered; payment and notification bindings left for the plugin.
+\end{itemize}
+
+\subsection{Test matrix}
+
+Table~\ref{tab:checkout-results} records command outcomes.
+
+\begin{table}[htbp]
+\centering
+\caption{CheckoutSample --- command results}
+\label{tab:checkout-results}
+\begin{tabular}{|p{4.5cm}|p{8.8cm}|}
+\hline
+\textbf{Command} & \textbf{Result} \\
+\hline
+Suggest factories (workspace) & \texttt{CheckoutCoordinatorFactory} listed; \texttt{PaymentCaptureServiceFactory} \textbf{absent} \\
+\hline
+Suggest registrations (workspace) & \texttt{IPaymentGateway}, \texttt{INotificationService}, concrete services not yet in root \\
+\hline
+Generate factories (workspace) & \texttt{GeneratedDI/CheckoutCoordinatorFactory.cs} created \\
+\hline
+Analyze workspace & No false ``missing'' for \texttt{IServiceProvider} on factory class \\
+\hline
+Insert registrations & Adds lines to \texttt{CompositionRoot.cs} with \texttt{Scoped} lifetime \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Discussion: AppBuilder content}
+
+The generated \texttt{AppBuilder.cs} in the repository may include both \texttt{CheckoutCoordinator} and \texttt{CheckoutCoordinatorFactory} depending on the generation version. The \textbf{design rule} after refinement is: when a factory exists for a service, register the \textbf{factory type} as the composition entry point and supply interface lines needed by \texttt{Create()}, avoiding double registration of the same concrete orchestrator. Regenerating \texttt{GeneratedDI/} after plugin updates is recommended for thesis replication.
+
+\textbf{Outcome:} Pass on factory threshold discrimination; partial pass on AppBuilder minimalism until samples are regenerated under the latest generator.
+
+\section{MultiFactorySample: multiple factories in one workspace}
+\label{chap5:multifactory}
+
+\subsection{Domain and intentional state}
+
+\texttt{MultiFactorySample} (\texttt{DataFlow} namespace) models ETL-style pipelines:
+\begin{itemize}
+	\item \texttt{ImportPipeline} --- \texttt{IImportSource}, \texttt{IImportValidator}, \texttt{IImportStorage} (exactly three parameters $\rightarrow$ factory);
+	\item \texttt{ExportPipeline} --- \texttt{IExportSource}, \texttt{IExportFormatter}, \texttt{IExportDelivery} (second factory);
+	\item \texttt{JobScheduler} --- two parameters (\texttt{IJobClock}, \texttt{IImportStorage}) $\rightarrow$ \textbf{no} factory.
+\end{itemize}
+
+\subsection{Results}
+
+\textbf{Suggest factories:} Both \texttt{ImportPipelineFactory} and \texttt{ExportPipelineFactory} appear in the Output channel.
+
+\textbf{Generate:} Two factory files plus \texttt{AppBuilder.cs}. The committed \texttt{AppBuilder} registers \texttt{ExportPipelineFactory} and \texttt{ImportPipelineFactory} without registering \texttt{ImportPipeline} or \texttt{ExportPipeline} concretes directly, while including interface$\rightarrow$implementation lines for dependencies---matching the refined factory-only registration policy. \texttt{JobScheduler} receives a direct \texttt{AddScoped<JobScheduler>()} because it is not factory-backed.
+
+\textbf{Outcome:} Pass. This sample is the primary evidence that workspace aggregation is \textbf{global} rather than first-match-wins.
+
+\subsection{Committed AppBuilder excerpt}
+
+The generated \texttt{AppBuilder.cs} in the repository illustrates factory-only registration for pipelines:
+
+\begin{lstlisting}[caption={MultiFactorySample GeneratedDI/AppBuilder.cs (excerpt)}]
+services.AddScoped<ExportPipelineFactory>();
+services.AddScoped<IExportDelivery, SftpExportDelivery>();
+// ... dependency interfaces ...
+services.AddScoped<ImportPipelineFactory>();
+services.AddScoped<JobScheduler>();
+return services.BuildServiceProvider();
+\end{lstlisting}
+
+Notably \texttt{ImportPipeline} and \texttt{ExportPipeline} concrete types are absent as direct \texttt{AddScoped} entries when factories exist; \texttt{JobScheduler} remains a direct registration because it has only two constructor dependencies.
+
+\section{MealPlanner: scale, framework registrations, and parse limits}
+\label{chap5:mealplanner}
+
+\subsection{Domain and intentional state}
+
+\texttt{MealPlanner} is a full ASP.NET Core API with Entity Framework Core, AutoMapper, Identity, dozens of \texttt{AddScoped<IRepository, Repository>} lines in \texttt{ApplicationServiceExtensions.AddApplicationServices}, and large generated migration files (e.g.\ \texttt{DataContextModelSnapshot.cs} exceeding 32\,KiB).
+
+\subsection{Regression: Invalid argument on all commands}
+
+\textbf{Symptom:} Running any DI command on the MealPlanner workspace produced VS Code error \texttt{Command failed: Invalid argument}.
+
+\textbf{Root cause:} The \texttt{node-tree-sitter} binding rejects source buffers larger than 32\,767 characters with \texttt{EINVAL}. EF snapshot and designer files exceed this limit.
+
+\textbf{Fix:} \texttt{analyzer.ts} skips AST parsing above \texttt{MAX\_PARSE\_SOURCE\_LENGTH}; \texttt{extension.ts} wraps per-file analysis in try/catch. Workspace-level regex registration scanning continues on skipped files.
+
+\textbf{Outcome:} Pass after fix; commands complete and Output reports list missing types only where genuinely absent from \texttt{AddApplicationServices}.
+
+\subsection{False-positive regression: IMapper and Identity}
+
+\textbf{Symptom:} \texttt{DI: Analyze workspace} reported \texttt{IMapper}, \texttt{UserManager<T>}, and similar types as missing despite \texttt{AddAutoMapper} and \texttt{AddIdentity*} calls.
+
+\textbf{Fix:} \texttt{collectExtendedRegistrationTypes} in \texttt{extension.ts} extends regex scanning beyond \texttt{AddScoped<T>} to cover \texttt{AddDbContext}, \texttt{AddAutoMapper}, Identity Core APIs, and role managers. \texttt{isImplicitFrameworkDependency} filters \texttt{IServiceProvider} and \texttt{IServiceScopeFactory}.
+
+\textbf{Outcome:} Pass; MealPlanner analysis no longer floods the report with framework-provided services.
+
+\subsection{Lifetime inference}
+
+Existing registrations in \texttt{AddApplicationServices} are overwhelmingly \texttt{AddScoped}. \texttt{preferredLifetimeForWorkspace} correctly suggests \texttt{Scoped} for any newly discovered service interface pairs.
+
+\textbf{Outcome:} Pass.
+
+\section{EventPlanner: alternative registration styles}
+\label{chap5:eventplanner}
+
+\texttt{EventPlanner} uses minimal hosting (\texttt{WebApplication.CreateBuilder}) and mixes:
+\begin{itemize}
+	\item conventional \texttt{AddScoped<IRepository, Repository>} lines;
+	\item \texttt{new ServiceDescriptor(typeof(IEventService), typeof(EventService), ServiceLifetime.Scoped)} style registration;
+	\item ASP.NET Identity with EF stores.
+\end{itemize}
+
+Workspace analysis detects the web host pattern (\texttt{aspNetMvcHost} flag) and includes \texttt{ServiceDescriptor} type pairs in \texttt{registeredTypes}. Factory generation typically does not trigger because services use fewer than three interface parameters or implementations are not all present as \texttt{interfaceToImpl} keys in scanned files.
+
+\textbf{Outcome:} Pass for host detection and non-crash on medium-sized web solution; factory generation not expected.
+
+\subsection{Commands exercised on EventPlanner}
+
+\begin{itemize}
+	\item \textbf{DI: Analyze workspace} --- lists constructors in services and repositories; missing-registration set is small because most repositories are registered in \texttt{Program.cs}.
+	\item \textbf{DI: Suggest registrations for workspace} --- typically few or no lines if \texttt{Program.cs} is complete; useful after adding a new \texttt{IXService}/\texttt{XService} pair without registration.
+	\item \textbf{DI: Suggest factories for workspace} --- usually empty output, validating that the three-parameter rule does not fire on typical CRUD services with one or two dependencies.
+\end{itemize}
+
+This sample proves the plugin is not tuned only to minimal console demos: it tolerates top-level statements, Identity, and alternate registration syntax without throwing.
+
+\section{Consolidated results summary}
+\label{chap5:summary-table}
+
+Table~\ref{tab:consolidated-results} consolidates pass/fail across major features.
+
+\begin{table}[htbp]
+\centering
+\caption{Consolidated manual test results}
+\label{tab:consolidated-results}
+\small
+\begin{tabular}{|l|c|c|c|c|}
+\hline
+\textbf{Feature} & \textbf{Base} & \textbf{Builder} & \textbf{Checkout} & \textbf{Multi} \\
+\hline
+Workspace analyze (no crash) & Pass & Pass & Pass & Pass \\
+\hline
+Registration suggest & Pass & Pass & Pass & Pass \\
+\hline
+Factory suggest ($\geq 3$ deps) & n/a & Pass & Pass & Pass \\
+\hline
+Factory withheld ($< 3$ deps) & n/a & Pass & Pass & Pass \\
+\hline
+Concrete-type diagnostic & n/a & Pass & n/a & n/a \\
+\hline
+Merge / insert composition root & n/a & Pass & Pass & Pass \\
+\hline
+\end{tabular}
+\end{table}
+
+MealPlanner and EventPlanner columns are omitted for space; both pass workspace analyze post-fix with feature-specific notes in Sections~\ref{chap5:mealplanner} and~\ref{chap5:eventplanner}.
+
+\section{Detailed test log: MealPlanner regression matrix}
+\label{chap5:mealplanner-matrix}
+
+Table~\ref{tab:mealplanner-regressions} records specific regressions encountered on the MealPlanner API and the implementing mitigation. This matrix supplements the narrative in Section~\ref{chap5:mealplanner}.
+
+\begin{longtable}{|p{3.2cm}|p{4.5cm}|p{5.8cm}|}
+\caption{MealPlanner regression matrix} \label{tab:mealplanner-regressions} \\
+\hline
+\textbf{Symptom} & \textbf{Cause} & \textbf{Mitigation / test result} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Symptom} & \textbf{Cause} & \textbf{Mitigation / test result} \\
+\hline
+\endhead
+All commands fail with Invalid argument & tree-sitter \texttt{EINVAL} on files $>$ 32\,KiB & Per-file length guard; Pass \\
+\hline
+\texttt{IMapper} reported missing & Only plain \texttt{Add*} scanned & \texttt{AddAutoMapper} $\rightarrow$ \texttt{IMapper}; Pass \\
+\hline
+\texttt{UserManager<T>} missing & Identity not in regex set & \texttt{collectExtendedRegistrationTypes}; Pass \\
+\hline
+\texttt{IServiceProvider} on factories & Treated as constructor dep & \texttt{isImplicitFrameworkDependency}; Pass \\
+\hline
+\texttt{Profile} subclasses suggested & Concrete class scan & \texttt{nonInjectableClassNames}; Pass \\
+\hline
+Slow workspace scan & 100+ files & 200-file cap + skip parse on huge files; Acceptable \\
+\hline
+\end{longtable}
+
+\section{Factory output example (CheckoutSample)}
+\label{chap5:factory-example}
+
+The following excerpt illustrates the shape of generated factory code (structure only; line breaks match generator conventions):
+
+\begin{lstlisting}[caption={Generated factory pattern (conceptual)}]
+public sealed class CheckoutCoordinatorFactory
+{
+    private readonly IServiceProvider _sp;
+    public CheckoutCoordinatorFactory(IServiceProvider sp) => _sp = sp;
+    public CheckoutCoordinator Create() => new CheckoutCoordinator(
+        _sp.GetRequiredService<IPaymentGateway>(),
+        _sp.GetRequiredService<IInventoryService>(),
+        _sp.GetRequiredService<IPricingEngine>(),
+        _sp.GetRequiredService<INotificationService>());
+}
+\end{lstlisting}
+
+Manual verification confirmed that \texttt{Create()} lists exactly the four interface types from the source constructor and that \texttt{PaymentCaptureService} never receives an analogous class in suggest-factory output.
+
+\section{Threats to validity and future automated testing}
+\label{chap5:threats}
+
+\textbf{Internal validity:} Manual execution depends on operator consistency; results were not recorded by a CI pipeline.
+
+\textbf{External validity:} Samples are small and authored for the plugin; performance on arbitrary GitHub repositories is unknown.
+
+\textbf{Construct validity:} ``Correct DI'' is not formally defined---pass criteria are alignment with sample README expectations and absence of known false positives.
+
+Recommended future work: golden-file tests that run \texttt{buildWorkspaceSummary} in Node without VS Code, snapshot suggested line arrays per sample folder, and fail CI on regression.

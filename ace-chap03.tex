@@ -8,122 +8,244 @@
 \section{Purpose and responsibilities}
 \label{chap3:purpose}
 
-The analyzer module is a \textbf{pure, VS Code--agnostic} TypeScript library. Its sole responsibility is to accept a C\# source string and return a \texttt{CSharpDiAnalysis} object describing:
+The analyzer module is a \textbf{pure, VS Code--agnostic} TypeScript library located at \texttt{src/csharp/analyzer.ts}. Its contract is narrow: given a UTF-8/UTF-16 C\# source string, return a \texttt{CSharpDiAnalysis} value. No file I/O, no workspace knowledge, no knowledge of \texttt{Microsoft.Extensions.DependencyInjection} beyond the shape of \texttt{AddSingleton|Scoped|Transient} generic calls present \emph{in the same file}.
+
+Responsibilities include:
 \begin{itemize}
-	\item all constructors found in \texttt{class\_declaration} nodes;
-	\item parameters with textual type names and source offsets;
-	\item file-local warnings: concrete-type parameters, circular constructor dependencies among classes \emph{defined in the same file}, and constructor parameters whose types do not appear in \texttt{Add*} registration lines \emph{in that same file}.
+	\item discovering all instance constructors on \texttt{class\_declaration} nodes in the parse tree;
+	\item recording each parameter's textual type name and source span for diagnostic underlining;
+	\item emitting \textbf{ConcreteTypeIssue} when a parameter type names a class defined in-file but not an interface defined in-file;
+	\item emitting \textbf{CircularDependencyIssue} when in-file classes depend on each other through constructor parameter types in a directed cycle;
+	\item emitting \textbf{MissingRegistrationIssue} when a parameter type is not found among \texttt{Add*} generic arguments scanned in the same file;
+	\item enforcing the \textbf{32\,KiB parse guard} and try/catch around native parse calls so callers always receive a structured result.
 \end{itemize}
 
-It does not read the workspace, apply quick fixes, or generate code. The extension host calls \texttt{analyzeCSharp()} from diagnostics, commands, and workspace aggregation.
+The extension host invokes \texttt{analyzeCSharp()} from three contexts: per-document diagnostics on edit, the ``analyze current file'' command, and per-file iteration inside \texttt{buildWorkspaceSummary()}. Workspace-level missing-registration logic \textbf{duplicates and extends} the analyzer's registration concept in \texttt{extension.ts}; the analyzer's missing-registration issue remains strictly \emph{per-file} by design.
 
 \section{Key data structures and interfaces}
 \label{chap3:data-structures}
 
-Table~\ref{tab:analyzer-types} lists exported types.
+Table~\ref{tab:analyzer-types} lists exported interfaces. Each type is a plain TypeScript interface without classes, favoring JSON-serializable snapshots for potential future testing.
 
 \begin{table}[htbp]
 \centering
 \caption{Exported interfaces in \texttt{analyzer.ts}}
 \label{tab:analyzer-types}
-\begin{tabular}{|l|p{8.8cm}|}
+\begin{tabular}{|l|p{8.5cm}|}
 \hline
 \textbf{Type} & \textbf{Meaning} \\
 \hline
-\texttt{ConstructorParam} & Parameter \texttt{type}, \texttt{name}, \texttt{startIndex}, \texttt{endIndex} in UTF-16/byte-aligned tree-sitter indices. \\
+\texttt{ConstructorParam} & Parameter \texttt{type}, \texttt{name}, \texttt{startIndex}, \texttt{endIndex} (tree-sitter byte indices into source). \\
 \hline
-\texttt{ConstructorInfo} & Owning \texttt{className}, parameter list, constructor span. \\
+\texttt{ConstructorInfo} & \texttt{className}, \texttt{params[]}, constructor \texttt{startIndex}/\texttt{endIndex}. \\
 \hline
-\texttt{ConcreteTypeIssue} & Parameter whose type is a \texttt{class} in-file but not an \texttt{interface} in-file. \\
+\texttt{ConcreteTypeIssue} & \texttt{className}, \texttt{paramType}, parameter span, message. \\
 \hline
-\texttt{CircularDependencyIssue} & Directed cycle among in-file classes via constructor parameter types. \\
+\texttt{CircularDependencyIssue} & \texttt{cycle: string[]} class names forming a directed cycle. \\
 \hline
-\texttt{MissingRegistrationIssue} & Parameter type not listed in file-local \texttt{Add*} scan. \\
+\texttt{MissingRegistrationIssue} & \texttt{className}, \texttt{paramType} not in file-local registration set. \\
 \hline
-\texttt{CSharpDiAnalysis} & Aggregate of constructors, \texttt{errors}, and three issue arrays. \\
+\texttt{CSharpDiAnalysis} & \texttt{constructors}, \texttt{errors[]}, three issue arrays. \\
 \hline
 \end{tabular}
 \end{table}
 
-The parser and grammar are module singletons:
+\subsection{Parser singleton}
+
+The module initializes tree-sitter once:
+
 \begin{lstlisting}[caption={Parser initialization (\texttt{analyzer.ts})}]
 const parser = new Parser();
 parser.setLanguage(CSharp);
 \end{lstlisting}
 
+Reusing the parser avoids reloading the grammar per call. Parse trees are local variables discarded after \texttt{analyzeCSharp} returns.
+
+\subsection{Comparison to workspace-level types}
+
+\texttt{ConstructorInfo} in the analyzer lacks \texttt{fileName}; the host attaches path metadata when merging into \texttt{WorkspaceDiSummary}. Issue types in the analyzer are file-local; the host may suppress or reinterpret them when presenting workspace reports (e.g.\ framework types).
+
 \section{Algorithms and analysis logic}
 \label{chap3:algorithms}
 
-\subsection{Parse guard and error handling}
+\subsection{Entry point: \texttt{analyzeCSharp(source)}}
 
-Before parsing, the module enforces \texttt{MAX\_PARSE\_SOURCE\_LENGTH = 32767} because the \texttt{node-tree-sitter} binding rejects larger buffers with \texttt{EINVAL} (``Invalid argument''). Files such as Entity Framework \texttt{DataContextModelSnapshot.cs} skip AST analysis and return an error string while the host continues workspace-level regex analysis.
-
-Parse exceptions are caught and converted to \texttt{errors[]} messages; the host never crashes on a single bad file.
-
-\subsection{Constructor extraction}
-
-Algorithm steps:
+The public function executes in order:
 \begin{enumerate}
-	\item Obtain \texttt{class\_declaration} nodes via \texttt{descendantsOfType} (with manual fallback traversal).
-	\item For each class, collect \texttt{constructor\_declaration} nodes.
-	\item For each parameter list, read \texttt{parameter} or \texttt{\_parameter\_array} named children.
-	\item Resolve type text via \texttt{findTypeOfParameter}: prefer \texttt{childForFieldName("type")}, else first identifier-like child before the name field.
+	\item If \texttt{source.length > MAX\_PARSE\_SOURCE\_LENGTH} (32767), return empty constructors and \texttt{errors: ["Source exceeds tree-sitter limit..."]}.
+	\item Invoke \texttt{parser.parse(source)} inside try/catch; on failure, return error message without throwing.
+	\item If root \texttt{hasError()}, append syntax warning but continue best-effort traversal.
+	\item Build in-file \texttt{classes} and \texttt{interfaces} sets by walking \texttt{class\_declaration} and \texttt{interface\_declaration} nodes.
+	\item Extract constructors; run concrete-type, cycle, and missing-registration passes.
+	\item Return populated \texttt{CSharpDiAnalysis}.
 \end{enumerate}
 
-Primary constructors and unusual parameter syntax may be missed if the grammar node types differ from classic \texttt{parameter} nodes.
+\subsection{Parse guard and error handling}
+
+The constant \texttt{MAX\_PARSE\_SOURCE\_LENGTH = 32767} exists because the \texttt{node-tree-sitter} binding rejects larger buffers with \texttt{EINVAL} (surfacing in VS Code as ``Invalid argument''). Entity Framework \texttt{DataContextModelSnapshot.cs} in MealPlanner exceeds this threshold by an order of magnitude. Skipping AST analysis for such files is mandatory for workspace stability; regex-based registration scanning in the host still processes their text for \texttt{AddDbContext} if present elsewhere.
+
+Parse exceptions from corrupted or non-C\# content are caught and converted to \texttt{errors[]} strings. The host never wraps \texttt{analyzeCSharp} in an uncaught promise rejection.
+
+\subsection{Constructor extraction algorithm}
+
+\textbf{Input:} parse tree root. \textbf{Output:} \texttt{ConstructorInfo[]}.
+
+Steps:
+\begin{enumerate}
+	\item Collect nodes of type \texttt{class\_declaration} via \texttt{descendantsOfType}, with manual child traversal fallback if grammar version differs.
+	\item For each class, read identifier child as \texttt{className}.
+	\item Collect \texttt{constructor\_declaration} descendants.
+	\item For each constructor, locate \texttt{parameter\_list} and iterate \texttt{parameter} or \texttt{\_parameter\_array} children.
+	\item For each parameter, resolve type text using \texttt{findTypeOfParameter(node)}:
+	\begin{itemize}
+		\item prefer \texttt{childForFieldName("type")};
+		\item else scan children before \texttt{name} field for identifier-like nodes;
+		\item concatenate \texttt{predefined\_type}, \texttt{identifier}, \texttt{generic\_name} text.
+	\end{itemize}
+	\item Store parameter \texttt{name} from \texttt{name} field child; record node start/end indices.
+\end{enumerate}
+
+\textbf{Limitations:} primary constructors (C\# 12+) may use different node shapes; \texttt{record} types may share \texttt{class\_declaration} in grammar; \texttt{ref}/\texttt{out}/\texttt{params} parameters may yield incomplete type strings.
 
 \subsection{Concrete-type detection}
 
-For each constructor parameter type \(t\):
+For each constructor parameter with type string \(t\):
 \begin{itemize}
-	\item if \(t\) appears in the in-file \texttt{classes} set and not in the in-file \texttt{interfaces} set, emit \texttt{ConcreteTypeIssue}.
+	\item Normalize \(t\) by stripping nullable \texttt{?} suffix where applicable.
+	\item If \(t \in \texttt{classes}\) and \(t \notin \texttt{interfaces}\), emit \texttt{ConcreteTypeIssue}.
 \end{itemize}
 
-This is intentionally \textbf{file-local}: a parameter typed as \texttt{SmtpEmailSender} is flagged even if \texttt{IEmailSender} exists elsewhere in the solution.
+\textbf{Rationale:} depending on a concrete class in a constructor is a DI smell when an abstraction exists; the quick fix path encourages extracting \texttt{I\{Name\}}.
+
+\textbf{Example (BuilderFactorySample):} \texttt{ConcreteMailerService(SmtpEmailSender smtp)} flags \texttt{SmtpEmailSender} because the class is declared in the same file and is not listed as an interface.
+
+\textbf{File-local scope:} if \texttt{IEmailSender} is defined in another file, the analyzer still flags \texttt{SmtpEmailSender} in the consumer file. Workspace-level suggestions may still propose \texttt{IEmailSender, SmtpEmailSender} registration---the warning educates about local constructor shape.
 
 \subsection{Circular dependency detection}
 
-Build a directed graph: nodes are class names in the file; edge \(A \rightarrow B\) exists if \(B\) is the type of some constructor parameter of class \(A\) and \(B\) is also a class in the file. Run DFS cycle detection; deduplicate cycles by sorted node keys. Report one representative cycle per equivalence class.
+\textbf{Graph construction:} nodes are class names \(C\) declared in the file. Directed edge \(A \rightarrow B\) exists if class \(A\) has a constructor parameter of type \(B\) and \(B\) is also a class in the file (not interface, not primitive).
 
-This detects \emph{structural} cycles resolvable only by constructors in the same compilation unit---not runtime cycles involving interfaces registered only in other files.
+\textbf{Cycle finding:} depth-first search with recursion stack; on revisiting a stack node, record cycle path. Cycles are deduplicated by sorting node keys to avoid duplicate diagnostics for the same ring.
+
+\textbf{Interpretation:} this detects structural cycles resolvable only by changing constructors within the same compilation unit---for example \texttt{A(B b)} and \texttt{B(A a)}. It does \textbf{not} detect runtime cycles through interfaces registered only in other files.
 
 \subsection{Missing registration detection (file scope)}
 
-Scan the file for:
+The file is scanned with:
 \begin{lstlisting}[caption={Registration regex (file-local)}]
 /Add(?:Singleton|Scoped|Transient)\s*<([^>]+)>/g
 \end{lstlisting}
-Collect type names from generic arguments (split on comma). Flag each non-primitive parameter type absent from that set.
+Generic argument groups are split on commas; each token is trimmed and added to \texttt{registeredInFile}. For each constructor parameter type \(p\):
+\begin{itemize}
+	\item skip if \(p\) is in a built-in primitive set (\texttt{string}, \texttt{int}, \texttt{bool}, etc.);
+	\item if \(p \notin \texttt{registeredInFile}, emit \texttt{MissingRegistrationIssue}.
+\end{itemize}
 
-\textbf{Note:} Workspace-level missing-registration analysis in \texttt{extension.ts} uses \texttt{collectExtendedRegistrationTypes} across all files and implicit framework types; the analyzer's missing-registration issue is strictly \emph{per-file}.
+\textbf{Important distinction:} workspace-level analysis uses \texttt{collectExtendedRegistrationTypes} (\texttt{AddDbContext}, \texttt{AddAutoMapper}, Identity, \texttt{typeof} pairs). The analyzer does \textbf{not} implement those patterns to remain dependency-free and small. A file may show file-local missing issues while workspace analysis considers the type registered---developers should trust workspace commands for ASP.NET extension-method registrations.
 
 \section{Extension commands using the analyzer}
 \label{chap3:commands}
 
-The analyzer has no commands of its own. The host invokes it as follows:
+The analyzer exposes no VS Code commands. Table~\ref{tab:analyzer-invocation} maps host features to analyzer usage.
+
+\begin{table}[htbp]
+\centering
+\caption{Host features invoking \texttt{analyzeCSharp}}
+\label{tab:analyzer-invocation}
+\begin{tabular}{|p{4.2cm}|p{8.8cm}|}
+\hline
+\textbf{Host feature} & \textbf{Analyzer role} \\
+\hline
+Continuous diagnostics & Full \texttt{CSharpDiAnalysis} mapped to \texttt{Diagnostic[]} on each C\# document change. \\
+\hline
+\texttt{di-plugin.analyzeFile} & Pretty-print constructors and issues to Output channel. \\
+\hline
+\texttt{buildWorkspaceSummary} & Per-file merge of constructors; file-local issues optional for aggregate reporting. \\
+\hline
+Factory eligibility & Uses \texttt{ConstructorInfo.params.length} and types; factory decision in host uses \texttt{interfaceToImpl}, not analyzer issues. \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Diagnostic mapping (host side, analyzer output)}
+
+Although implemented in \texttt{extension.ts}, the mapping contract is part of the analyzer's consumer API:
 \begin{itemize}
-	\item \textbf{Continuous diagnostics} --- \texttt{analyzeCSharpDocument} on open/change for C\# documents.
-	\item \textbf{DI: Analyze current file} --- prints constructors and issues to the Output channel.
-	\item \textbf{Workspace aggregation} --- \texttt{buildWorkspaceSummary} calls \texttt{analyzeCSharp} per file (subject to size limit).
+	\item constructor spans $\rightarrow$ Information diagnostic listing dependency names;
+	\item \texttt{ConcreteTypeIssue} $\rightarrow$ Warning at parameter range;
+	\item \texttt{CircularDependencyIssue} $\rightarrow$ Warning at constructor range;
+	\item \texttt{MissingRegistrationIssue} $\rightarrow$ Warning at parameter range;
+	\item parse guard \texttt{errors[0]} $\rightarrow$ Warning at \texttt{(0,0)} document start.
 \end{itemize}
 
 \section{Heuristics and design decisions}
 \label{chap3:heuristics}
 
-\begin{itemize}
-	\item \textbf{Tree-sitter over Roslyn:} smaller deployment, works on raw text; trades away symbol resolution.
-	\item \textbf{In-file class/interface sets:} fast concrete-type and cycle checks without a solution-wide symbol table.
-	\item \textbf{Primitive filter:} \texttt{string}, \texttt{int}, etc. are excluded from missing-registration warnings.
-	\item \textbf{Offset preservation:} parameter and constructor spans enable precise diagnostic underlines and quick-fix ranges.
-\end{itemize}
+\subsection{Tree-sitter over Roslyn}
+
+\begin{table}[htbp]
+\centering
+\caption{Roslyn vs.\ tree-sitter in this project}
+\label{tab:roslyn-vs-ts}
+\small
+\begin{tabular}{|l|p{5.5cm}|p{5.5cm}|}
+\hline
+\textbf{Criterion} & \textbf{Roslyn} & \textbf{tree-sitter (chosen)} \\
+\hline
+Deployment in TS extension & Heavy (hosted process / bundled binaries) & Native addon + grammar \\
+\hline
+Constructor extraction & Exact & Exact for supported grammar \\
+\hline
+Cross-file symbols & Yes & No \\
+\hline
+Parse speed on edit & Moderate & Fast \\
+\hline
+Max buffer & Large & 32\,KiB in practice \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{In-file class/interface sets}
+
+Building sets from declarations in the same file avoids maintaining a solution-wide symbol table. Cost is false positives for concrete types when abstraction lives elsewhere---acceptable for a lint-style warning.
+
+\subsection{Primitive and framework exclusion (file level)}
+
+Only a small primitive list is excluded from missing-registration in the analyzer. Framework exclusions (\texttt{ILogger<T>}, etc.) are applied in the host because they require project-level conventions.
+
+\subsection{Offset preservation}
+
+Tree-sitter indices enable precise squiggles. The host converts to VS Code \texttt{Position} using document UTF-16 offsets. Mismatches can occur if the grammar byte offset model diverges from VS Code's UTF-16 indexing on rare surrogate pairs; samples use ASCII identifiers.
 
 \section{Known limitations}
 \label{chap3:limitations}
 
 \begin{itemize}
-	\item \textbf{32 KiB parse ceiling} --- large generated migrations are skipped for AST features.
+	\item \textbf{32 KiB parse ceiling} --- large generated migrations are invisible to AST features; only host regex sees them.
 	\item \textbf{No cross-file semantics} --- interface implementation in another file does not suppress concrete-type warnings in the consumer file.
-	\item \textbf{Regex registration in analyzer} --- does not understand \texttt{AddAutoMapper}, \texttt{AddDbContext}, or \texttt{AddIdentityCore}; those are handled only at workspace level in \texttt{extension.ts}.
-	\item \textbf{Parameter type resolution} --- complex attributes, \texttt{ref}/\texttt{out}, and tuple types may yield incomplete type strings (\texttt{?}).
-	\item \textbf{Parse error nodes} --- \texttt{hasError} on the tree yields a generic warning; partial recovery is not attempted.
+	\item \textbf{Narrow registration regex in analyzer} --- \texttt{AddAutoMapper}, \texttt{AddDbContext}, factory delegates, and \texttt{TryAdd*} are not recognized file-locally.
+	\item \textbf{Parameter type resolution} --- attributes, tuples, function pointers, and \texttt{global::} qualifiers may yield incomplete type strings.
+	\item \textbf{Parse error nodes} --- \texttt{hasError} yields generic warning; no error-node recovery strategy.
+	\item \textbf{No async/disposal analysis} --- \texttt{IAsyncDisposable} and \texttt{IDisposable} marker interfaces are not special-cased in the analyzer (host excludes markers from registration suggestions).
 \end{itemize}
+
+\section{Worked example: \texttt{CheckoutCoordinator}}
+\label{chap3:worked-example}
+
+Consider the following constructor (from \texttt{CheckoutSample/Services.cs}):
+
+\begin{lstlisting}[caption={CheckoutCoordinator constructor (excerpt)}]
+public CheckoutCoordinator(
+    IPaymentGateway payment,
+    IInventoryService inventory,
+    IPricingEngine pricing,
+    INotificationService notifications)
+\end{lstlisting}
+
+\textbf{Analyzer pass:} all parameter types are interfaces declared in other files in the same sample; no \texttt{ConcreteTypeIssue}. File-local missing-registration may fire if \texttt{CompositionRoot.cs} in the same workspace folder is not part of the same parse context---typically the analyzer analyzes one file at a time, so missing-registration in \texttt{Services.cs} flags parameters not registered \emph{in Services.cs itself}, not in sibling files.
+
+\textbf{Host pass:} \texttt{buildWorkspaceSummary} merges registrations from \texttt{CompositionRoot.cs}, sees \texttt{IInventoryService} and \texttt{IPricingEngine} already registered, and lists \texttt{IPaymentGateway} and \texttt{INotificationService} as missing. Factory eligibility uses parameter count four $\geq 3$ and interface map entries for all types.
+
+This example clarifies why both modules are necessary: the analyzer educates at file level; the host answers the composition question developers actually care about.
+
+Chapter~\ref{chap5:evaluation} documents MealPlanner as the primary stress test for the parse guard and contrasts file-local vs.\ workspace missing-registration behavior on \texttt{ApplicationServiceExtensions.cs}.

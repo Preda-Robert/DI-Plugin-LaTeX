@@ -1,3 +1,42 @@
-\chapter*{Codul sursă}
-\addcontentsline{toc}{chapter}{Codul sursă}
-~\index{codul sursă}
+\selectlanguage{english}
+\chapter*{Source code and repository layout}
+\addcontentsline{toc}{chapter}{Source code and repository layout}
+\label{appendix:sourcecode}
+
+The DI Plugin source code and sample workspaces are maintained in a single repository. Table~\ref{tab:repo-layout} lists the principal paths referenced throughout this thesis.
+
+\begin{table}[htbp]
+\centering
+\caption{Repository layout (principal paths)}
+\label{tab:repo-layout}
+\small
+\begin{tabular}{|l|p{9.5cm}|}
+\hline
+\textbf{Path} & \textbf{Description} \\
+\hline
+\texttt{src/extension.ts} & VS Code activation, commands, workspace summary, generation \\
+\hline
+\texttt{src/csharp/analyzer.ts} & tree-sitter C\# analyzer \\
+\hline
+\texttt{src/registrationInsert.ts} & Composition-root insert and merge \\
+\hline
+\texttt{src/extractInterface.ts} & Extract-interface quick fix \\
+\hline
+\texttt{package.json} & Extension manifest and command contributions \\
+\hline
+\texttt{sample/} & Validation workspaces (Chapter~\ref{chap5:evaluation}) \\
+\hline
+\texttt{sample/SAMPLES.md} & Index of samples and expected command outcomes \\
+\hline
+\texttt{out/extension.js} & Compiled extension entry (after \texttt{npm run compile}) \\
+\hline
+\end{tabular}
+\end{table}
+
+\section{Building and running the extension}
+
+Developers load the repository in VS Code, run \texttt{npm install}, then \texttt{npm run compile}. Pressing \texttt{F5} launches an Extension Development Host with the plugin loaded. Sample folders under \texttt{sample/} should be opened as workspace roots when reproducing the manual tests in Chapter~\ref{chap5:evaluation}.
+
+\section{Sample-generated artifacts}
+
+Generated files are written to \texttt{GeneratedDI/} within each sample when \textbf{DI: Generate builders/factories files (workspace)} is executed. Committed copies in the repository illustrate expected generator output; regenerating after plugin updates is recommended before comparing against thesis tables.

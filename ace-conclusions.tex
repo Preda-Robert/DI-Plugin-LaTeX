@@ -7,24 +7,73 @@
 
 \section{Summary of contributions}
 
-This work presented a VS Code extension that assists C\# developers with \texttt{Microsoft.Extensions.DependencyInjection}. The solution combines a tree-sitter--based analyzer module with a heuristic workspace aggregator hosted in the Extension API. Together they provide constructor dependency insight, DI smell detection, registration suggestions, optional factory code generation, and composition-root insertion workflows.
+This thesis presented the design, implementation, and manual evaluation of a Visual Studio Code extension that assists C\# developers using \texttt{Microsoft.Extensions.DependencyInjection}. The solution combines a tree-sitter--based analyzer module with a heuristic workspace aggregator hosted in the Extension API. Together they provide constructor dependency insight, DI smell detection, registration suggestions, optional factory code generation, and composition-root insertion workflows.
 
-The modular split---\texttt{analyzer.ts} for syntax facts, \texttt{extension.ts} for orchestration, \texttt{registrationInsert.ts} and \texttt{extractInterface.ts} for targeted edits---keeps responsibilities testable and documents a practical architecture for small language-aware IDE tools.
+The modular split---\texttt{analyzer.ts} for syntax facts, \texttt{extension.ts} for orchestration, \texttt{registrationInsert.ts} and \texttt{extractInterface.ts} for targeted edits---demonstrates a practical architecture for small language-aware IDE tools that cannot assume Roslyn as a dependency. Each module's responsibilities, data structures, algorithms, commands, heuristics, and limitations were documented in dedicated chapters to support academic review and future maintenance.
 
 \section{Evaluation against objectives}
 
-The sample workspaces (\texttt{BuilderFactorySample}, \texttt{CheckoutSample}, \texttt{MultiFactorySample}, \texttt{MealPlanner}) demonstrate that:
+Chapter~\ref{chap5:evaluation} answered the research questions posed in Chapter~\ref{chap1:research-questions}:
+
 \begin{itemize}
-	\item factory generation activates for services with three or more interface dependencies and produces usable \texttt{*Factory.cs} templates;
-	\item registration suggestions align with composition-root lifetime conventions when a root file exists;
-	\item false positives for \texttt{IMapper}, \texttt{IServiceProvider}, and Identity managers were reduced by extended registration detection;
-	\item separating factory output from \texttt{services.Add*} suggestions avoids redundant \texttt{AppBuilder} content in the factory command.
+	\item \textbf{RQ1 (constructor extraction):} tree-sitter reliably extracted constructors and parameter types on all sample files under the 32\,KiB limit; MealPlanner required skip-guard for EF snapshots without aborting the host.
+	\item \textbf{RQ2 (workspace missing registrations):} extended regex registration detection plus implicit framework filters eliminated the majority of false positives on MealPlanner (\texttt{IMapper}, Identity managers, \texttt{IServiceProvider}).
+	\item \textbf{RQ3 (factory generation):} the three-parameter rule with full interface mapping correctly included \texttt{OrderNotificationService}, \texttt{CheckoutCoordinator}, \texttt{ImportPipeline}, and \texttt{ExportPipeline} while excluding two-parameter services in Checkout and MultiFactory samples.
+	\item \textbf{RQ4 (editor integration):} insert and merge into \texttt{CompositionRoot} succeeded after fixing return-line insertion; extract-interface quick fix validated on \texttt{ConcreteMailerService}.
 \end{itemize}
+
+Table~\ref{tab:conclusions-samples} recalls sample-level outcomes.
+
+\begin{table}[htbp]
+\centering
+\caption{Sample validation summary (see Chapter~\ref{chap5:evaluation} for detail)}
+\label{tab:conclusions-samples}
+\begin{tabular}{|l|p{10cm}|}
+\hline
+\textbf{Sample} & \textbf{Key result} \\
+\hline
+\texttt{BaseSample} & Registration suggestions without existing composition root \\
+\hline
+\texttt{BuilderFactorySample} & Factory + concrete smell + merge \\
+\hline
+\texttt{CheckoutSample} & Factory positive / \texttt{PaymentCaptureService} negative \\
+\hline
+\texttt{MultiFactorySample} & Two factories in one workspace \\
+\hline
+\texttt{MealPlanner} & Scale + AutoMapper/Identity; parse guard essential \\
+\hline
+\texttt{EventPlanner} & \texttt{ServiceDescriptor} style registrations recognized \\
+\hline
+\end{tabular}
+\end{table}
+
+\section{Lessons learned during development}
+
+Several regressions shaped the final architecture and are worth recording as engineering lessons:
+
+\begin{enumerate}
+	\item \textbf{Native binding limits are hard failures.} A single oversized file caused \texttt{EINVAL} and broke every command until per-file guards existed---fail-soft must be explicit, not assumed.
+	\item \textbf{Registration detection must mirror real ASP.NET code.} File-local \texttt{AddScoped<T>} regex alone is insufficient for production APIs using \texttt{AddAutoMapper} and Identity.
+	\item \textbf{User mental models separate factories from registrations.} Presenting identical \texttt{AppBuilder} output in both command categories created perceived bugs; separating outputs improved usability without changing core analysis.
+	\item \textbf{Text insertion is fragile.} Token-level positions for \texttt{return} corrupted lines; line-start insertion is a robust anchor for composition roots.
+\end{enumerate}
 
 \section{Limitations}
 
-The approach remains \textbf{heuristic and syntactic}, not a substitute for Roslyn-powered refactorings or runtime DI validation. Large C\# files exceed the tree-sitter buffer limit; cross-file concrete-type smells may persist; and empty extracted interfaces require manual completion.
+The approach remains \textbf{heuristic and syntactic}, not a substitute for Roslyn-powered refactorings or runtime DI validation. Large C\# files exceed the tree-sitter buffer limit; cross-file concrete-type smells may persist; empty extracted interfaces require manual completion; lifetime inference does not encode domain rules about captive dependencies or singleton state.
+
+Manual test procedures lack CI automation; external validity to arbitrary open-source repositories is unknown. The 200-file workspace cap may truncate analysis in very large solutions.
 
 \section{Future work}
 
-Recommended extensions include: Roslyn integration or LSP collaboration for symbol-accurate analysis; configurable factory thresholds; support for additional registration APIs; undo-friendly refactorings; unit tests over golden-file samples; and optional export of dependency graphs (e.g.\ Graphviz) for architecture reviews.
+Recommended extensions include:
+\begin{itemize}
+	\item Roslyn integration or LSP collaboration for symbol-accurate analysis and partial-class merging;
+	\item configurable factory thresholds and exclusion lists via \texttt{package.json} settings;
+	\item golden-file Node tests executing \texttt{buildWorkspaceSummary} on each \texttt{sample/} folder;
+	\item optional dependency graph export (Graphviz or Mermaid) for architecture reviews;
+	\item member copying in extract-interface refactorings;
+	\item regeneration of committed \texttt{GeneratedDI/} artifacts under CI to detect generator drift.
+\end{itemize}
+
+In summary, the DI Plugin shows that a focused VS Code extension can materially reduce friction in C\# dependency injection workflows when analysis rules are transparent, failures are contained per file, and validation is anchored in reproducible sample workspaces.

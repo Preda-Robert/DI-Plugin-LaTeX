@@ -8,44 +8,97 @@
 \section{Purpose of the work}
 \label{chap1:purpose}
 
-This thesis documents the design and implementation of a \textbf{Visual Studio Code extension} that assists C\# developers working with \texttt{Microsoft.Extensions.DependencyInjection}. The extension, referred to in the repository as the \emph{Dependency Injection Plugin} (\texttt{di-plugin}), closes a gap between compile-time type checking and the manual work of wiring services in a composition root (\texttt{Program.cs}, \texttt{Startup}, or a dedicated \texttt{CompositionRoot} class).
+This thesis documents the design, implementation, and empirical validation of a \textbf{Visual Studio Code extension} that assists C\# developers working with \texttt{Microsoft.Extensions.DependencyInjection}. The extension, referred to in the repository as the \emph{Dependency Injection Plugin} (\texttt{di-plugin}), addresses a recurring gap in daily development: the compiler verifies type correctness inside constructors, but it does \emph{not} verify that every required service is registered in the inversion-of-control container before the application runs.
 
-The primary objectives are:
+In practice, missing registrations surface only at runtime---often as \texttt{InvalidOperationException} stating that a service cannot be resolved---or during integration tests. The composition root (\texttt{Program.cs}, \texttt{Startup.ConfigureServices}, a static \texttt{CompositionRoot} class, or extension methods such as \texttt{AddApplicationServices}) grows organically with each new feature. Developers must remember to add \texttt{services.AddScoped<IContract, Implementation>()} lines, choose an appropriate lifetime, and occasionally introduce a factory when constructor arity becomes unwieldy. The plugin automates \textbf{discovery}, \textbf{warning}, and \textbf{partial remediation} of these tasks directly in the editor.
+
+The primary objectives of the work are:
 \begin{itemize}
-	\item to \textbf{parse} C\# source code and extract constructor dependency graphs using a syntax-aware analyzer;
-	\item to \textbf{detect} common DI smells (concrete constructor parameters, circular dependencies within a file, missing \texttt{services.Add*} registrations);
-	\item to \textbf{suggest or generate} registration lines and optional factory classes for services with many interface dependencies;
-	\item to integrate with the VS Code editor through \textbf{diagnostics}, \textbf{commands}, and \textbf{quick fixes}.
+	\item to \textbf{parse} C\# source code and extract constructor dependency graphs using a syntax-aware analyzer that does not require the full Roslyn compiler inside the extension;
+	\item to \textbf{detect} common DI smells, including concrete constructor parameters, file-local circular constructor dependencies, and missing \texttt{services.Add*} registrations relative to workspace knowledge;
+	\item to \textbf{suggest or generate} registration lines and optional factory classes for services with many interface dependencies, with lifetimes inferred from existing composition-root conventions;
+	\item to integrate with the VS Code editor through \textbf{diagnostics}, \textbf{commands}, \textbf{quick fixes}, and \textbf{workspace edits} that insert or merge registration code into recognized composition-root locations.
 \end{itemize}
 
-The implementation is intentionally heuristic: it does not execute the application, load assemblies, or invoke the Roslyn compiler. Instead it combines \emph{tree-sitter} parsing for structural facts with regular-expression scanning for registration patterns found in real ASP.NET Core projects.
+The implementation is intentionally \textbf{heuristic}: it does not execute the application, load assemblies, or build a semantic model equivalent to the C\# compiler. Instead it combines \emph{tree-sitter} parsing for structural facts (constructors, classes, interfaces declared in a file) with regular-expression scanning for registration patterns found in real ASP.NET Core projects. Chapter~\ref{chap5:evaluation} describes how six sample workspaces and two larger reference applications validate this approach.
 
-\section{Motivation}
+\section{Motivation and problem statement}
 \label{chap1:motivation}
 
-In medium and large .NET solutions, service registration is scattered across extension methods (\texttt{AddApplicationServices}), grows with each new repository or service, and is easy to leave incomplete. Developers routinely face three questions when adding a class:
+In medium and large .NET solutions, service registration is scattered across extension methods, feature modules, and test composition roots. Each new repository, service, or orchestrator raises three recurring questions:
 \begin{enumerate}
-	\item \emph{What} should be registered in the container?
-	\item \emph{With which lifetime} (singleton, scoped, transient)?
-	\item \emph{Should construction} use direct injection, a factory, or a builder when many dependencies are involved?
+	\item \emph{What} should be registered in the container (interface vs.\ concrete, open generic vs.\ closed)?
+	\item \emph{With which lifetime}---singleton, scoped, or transient---given ASP.NET Core's request scope semantics?
+	\item \emph{How should construction be performed}---direct constructor injection, a hand-written factory, or generated factory using \texttt{IServiceProvider}?
 \end{enumerate}
 
-IDE support from Visual Studio for DI is limited compared to refactoring tools for types and members. A lightweight VS Code extension that works on open workspaces---including cross-platform and \texttt{dotnet} CLI-centric workflows---can provide immediate feedback in the editor and produce copy-pasteable or insertable registration code.
+IDE support from Visual Studio for dependency injection is limited compared to refactoring tools for types and members. OmniSharp and C\# Dev Kit provide language services but do not typically answer ``is \texttt{IEmailSender} registered anywhere in this solution?'' A lightweight VS Code extension that operates on workspace text buffers fits cross-platform workflows centered on \texttt{dotnet} CLI, VS Code, and GitHub Codespaces.
 
-The sample projects shipped with the plugin (\texttt{BaseSample}, \texttt{BuilderFactorySample}, \texttt{CheckoutSample}, \texttt{MultiFactorySample}, \texttt{MealPlanner}) exist to validate analysis, suggestions, and code generation under controlled scenarios.
+The motivation intensifies in \textbf{teaching and prototyping} contexts: students and developers learning DI often create correct classes first and wire the container later. The plugin acts as a tutor---surfacing constructor dependencies in the Problems panel and offering copy-pasteable or insertable registration lines---while remaining optional for experts who prefer full manual control.
+
+\subsection{Illustrative failure mode}
+
+Consider a service \texttt{OrderNotificationService} depending on four interfaces. The class compiles; unit tests that manually \texttt{new} the service pass; but at runtime the generic host throws because \texttt{IEmailSender} was never registered. The \texttt{BuilderFactorySample} in the repository encodes exactly this scenario (Section~\ref{chap5:builder}). The plugin's workspace analyzer lists missing interface bindings and can generate a \texttt{OrderNotificationServiceFactory} when arity and interface-mapping rules are satisfied.
+
+\section{Research questions and success criteria}
+\label{chap1:research-questions}
+
+This work is guided by the following research questions:
+\begin{enumerate}
+	\item \textbf{RQ1:} Can accurate \emph{constructor dependency extraction} be performed with tree-sitter on typical application source files without Roslyn?
+	\item \textbf{RQ2:} Can \emph{workspace-level} missing-registration detection be approximated by combining AST extraction with regex registration scanning, including ASP.NET extension methods (\texttt{AddDbContext}, \texttt{AddAutoMapper}, Identity)?
+	\item \textbf{RQ3:} Can \emph{factory class generation} be triggered by simple, explainable rules (minimum dependency count, interface-to-implementation map) that match developer intuition?
+	\item \textbf{RQ4:} Can \emph{editor integration} (diagnostics, insert/merge) operate reliably on real composition-root layouts without corrupting source text?
+\end{enumerate}
+
+Success is measured against the sample validation matrix in Chapter~\ref{chap5:evaluation}: commands complete without host failure; suggestions match intentional gaps in sample \texttt{CompositionRoot} files; false positives for framework types are suppressed; factory suggestions respect the three-parameter threshold and negative controls (\texttt{PaymentCaptureService}, \texttt{JobScheduler}).
 
 \section{Current context}
 \label{chap1:context}
 
-\textbf{Dependency injection in .NET.} Since ASP.NET Core 2.x, the generic host builds an \texttt{IServiceProvider} from an \texttt{IServiceCollection}~\cite{ms-di}. Registrations are typically expressed as \texttt{services.AddScoped<IContract, Implementation>()}. Framework-provided services (\texttt{ILogger<T>}, \texttt{IConfiguration}, \texttt{IServiceProvider}) are registered by the host and need not appear in application code. The general pattern follows inversion-of-control containers described in the literature~\cite{fowler-di}.
+\subsection{Dependency injection in .NET}
 
-\textbf{Editor ecosystem.} VS Code extensions activate on language events (\texttt{onLanguage:csharp}) and expose commands, diagnostics, and code actions through the Extension API~\cite{vscode-api}. C\# language support is often provided by OmniSharp or C\# Dev Kit; this plugin complements those tools rather than replacing them.
+Since ASP.NET Core 2.x, the generic host builds an \texttt{IServiceProvider} from an \texttt{IServiceCollection}~\cite{ms-di}. Registrations are typically expressed as \texttt{services.AddScoped<IContract, Implementation>()}. Framework-provided services (\texttt{ILogger<T>}, \texttt{IConfiguration}, \texttt{IServiceProvider}, \texttt{IOptions<T>}) are registered by the host and need not appear in application code. The general pattern follows inversion-of-control containers described in the literature~\cite{fowler-di}.
 
-\textbf{Static analysis choice.} Full semantic analysis (Roslyn) would be more precise but heavier to deploy inside a TypeScript extension. The project uses \texttt{tree-sitter} with \texttt{tree-sitter-c-sharp} for fast, incremental-friendly parsing of constructors and class declarations, accepting known limits on file size and partial semantic knowledge.
+Third-party containers (Autofac, Lamar, etc.) are widely used but out of scope for automatic detection unless their registration syntax resembles the built-in generic \texttt{Add*} methods.
+
+\subsection{Editor ecosystem}
+
+VS Code extensions activate on language events (\texttt{onLanguage:csharp}) and expose commands, diagnostics, and code actions through the Extension API~\cite{vscode-api}. C\# language support is often provided by OmniSharp or C\# Dev Kit; this plugin \textbf{complements} those tools rather than replacing them. It reads the same open documents and workspace files but performs its own analysis pass in TypeScript.
+
+\subsection{Static analysis choice}
+
+Full semantic analysis via Roslyn would provide symbol resolution, partial classes across files, and accurate generic instantiation. Deploying Roslyn inside a TypeScript extension is heavyweight (runtime, versioning, memory). The project uses \texttt{tree-sitter} with \texttt{tree-sitter-c-sharp}~\cite{tree-sitter,tree-sitter-csharp} for fast parsing of constructors and class declarations, accepting known limits on file size (32\,KiB buffer in the native binding) and partial semantic knowledge. Chapter~\ref{chap3:analyzer} contrasts capabilities in detail.
+
+\section{Contributions}
+\label{chap1:contributions}
+
+The main contributions of this thesis are:
+\begin{itemize}
+	\item a \textbf{modular architecture} separating a VS Code--agnostic analyzer (\texttt{analyzer.ts}) from the extension host and edit helpers;
+	\item a \textbf{workspace aggregation model} (\texttt{WorkspaceDiSummary}) combining per-file AST results with extended registration regexes and implicit framework-type filters;
+	\item \textbf{eleven user-facing workflows} (analyze, suggest, generate, insert, merge, quick fixes) documented in Chapter~\ref{chap4:extension};
+	\item a \textbf{reproducible sample suite} and manual test catalogue (Chapter~\ref{chap5:evaluation}) including regression documentation for MealPlanner-scale projects.
+\end{itemize}
+
+\section{Related approaches}
+\label{chap1:related}
+
+Several alternative technologies could address similar goals; understanding why they were not chosen clarifies the contribution.
+
+\textbf{Roslyn analyzers and code fixes} integrate deeply with MSBuild and Visual Studio. They offer semantic accuracy and can ship as NuGet analyzer packages. However, they do not run inside VS Code without a separate language server or analyzer host, and packaging C\# analyzers for cross-editor use is non-trivial for a thesis prototype targeting VS Code specifically.
+
+\textbf{ReSharper / Rider inspections} provide mature DI hints in JetBrains IDEs. These are commercial, closed-source, and outside the VS Code ecosystem assumed by this project.
+
+\textbf{General-purpose linters} (SonarQube, etc.) may flag service locator patterns but rarely generate \texttt{AddScoped} lines or factories tailored to \texttt{Microsoft.Extensions.DependencyInjection}.
+
+\textbf{Manual composition-root templates} and source generators (e.g.\ Scrutor assembly scanning) reduce boilerplate but do not analyze constructor graphs of hand-written services. The DI Plugin complements scanning approaches by highlighting \emph{unregistered} hand-written types.
+
+The chosen approach---tree-sitter in TypeScript plus regex workspace passes---occupies a middle ground: \textbf{fast}, \textbf{deployable as a single VS Code extension}, and \textbf{transparent} enough to document in an academic thesis.
 
 \section{Scope and structure of the document}
 \label{chap1:structure}
 
-Chapter~\ref{chap2:architecture} presents the system architecture and module decomposition. Chapter~\ref{chap3:analyzer} documents the C\# analyzer module (\texttt{analyzer.ts}). Chapter~\ref{chap4:extension} documents the extension host (\texttt{extension.ts}) and auxiliary modules for registration insertion and interface extraction. Chapter~\ref{conclusions} summarizes contributions, limitations, and future work.
+Chapter~\ref{chap2:architecture} presents the system architecture, cross-cutting data structures, processing pipeline, and system-level design principles. Chapter~\ref{chap3:analyzer} documents the C\# analyzer module (\texttt{analyzer.ts}): data structures, algorithms, and file-local limitations. Chapter~\ref{chap4:extension} documents the extension host (\texttt{extension.ts}) and auxiliary modules \texttt{registrationInsert.ts} and \texttt{extractInterface.ts}, including command workflows and diagnostic mapping. Chapter~\ref{chap5:evaluation} provides in-depth sample descriptions and test results. Chapter~\ref{conclusions} summarizes findings, limitations, and future work.
 
-Out of scope for this implementation: automated refactoring of entire solutions via Roslyn, runtime verification of DI graphs, and support for third-party containers (Autofac, Ninject) beyond patterns that resemble \texttt{Microsoft.Extensions.DependencyInjection}.
+\textbf{Out of scope:} automated Roslyn refactoring of entire solutions; runtime verification of DI graphs; verification of object lifetime correctness (e.g.\ captive dependencies); support for non--Microsoft DI containers except where registration syntax mimics \texttt{AddSingleton|Scoped|Transient}; automated migration of legacy \texttt{Startup} patterns to minimal hosting without user review.

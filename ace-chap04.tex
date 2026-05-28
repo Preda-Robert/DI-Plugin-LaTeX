@@ -8,183 +8,321 @@
 \section{Purpose and responsibilities}
 \label{chap4:purpose}
 
-\texttt{extension.ts} is the \textbf{activation entry point} (\texttt{activate}/\texttt{deactivate}). It binds the analyzer to editor lifecycle events, exposes eleven contributed commands (see \texttt{package.json}), registers a \texttt{CodeActionProvider} for quick fixes, and coordinates file generation under \texttt{GeneratedDI/}.
+\texttt{extension.ts} is the \textbf{activation entry point} of the DI Plugin. The \texttt{activate(context)} function registers all subscriptions; \texttt{deactivate()} disposes diagnostics. Responsibilities span the full user journey: from opening a C\# file and seeing constructor hints, through workspace-wide missing-registration reports, to writing generated factories and merging \texttt{services.Add*} lines into a composition root.
 
-Auxiliary modules isolate edit construction:
+The host module is intentionally large because it encodes domain heuristics specific to \texttt{Microsoft.Extensions.DependencyInjection} and ASP.NET Core idioms. Two auxiliary modules isolate edit construction to keep the main file maintainable:
 \begin{itemize}
-	\item \texttt{registrationInsert.ts} --- find composition-root insertion points, deduplicate lines, normalize lifetimes;
-	\item \texttt{extractInterface.ts} --- multi-file \texttt{WorkspaceEdit} for extract-interface quick fixes.
+	\item \texttt{registrationInsert.ts} --- discovery of insertion anchors, deduplication, parsing generated \texttt{AppBuilder.cs}, lifetime normalization;
+	\item \texttt{extractInterface.ts} --- multi-file \texttt{WorkspaceEdit} for concrete-parameter quick fixes.
 \end{itemize}
+
+This chapter documents host data structures, the workspace aggregation algorithm, each contributed command workflow, diagnostic and code-action behavior, design heuristics, and limitations. Empirical outcomes appear in Chapter~\ref{chap5:evaluation}.
 
 \section{Key data structures and interfaces}
 \label{chap4:data-structures}
 
-Beyond \texttt{WorkspaceDiSummary} (Chapter~\ref{chap2:data-structures}), the host uses:
+Beyond \texttt{WorkspaceDiSummary} (Chapter~\ref{chap2:data-structures}), the host defines supporting types summarized in Table~\ref{tab:host-types}.
 
 \begin{table}[htbp]
 \centering
 \caption{Host-specific structures}
 \label{tab:host-types}
-\begin{tabular}{|l|p{8.8cm}|}
+\begin{tabular}{|l|p{8.5cm}|}
 \hline
 \textbf{Symbol} & \textbf{Role} \\
 \hline
-\texttt{WorkspaceCSharpFile} & Pair of \texttt{TextDocument} and source string. \\
+\texttt{WorkspaceCSharpFile} & \texttt{uri}, \texttt{source}, optional \texttt{document} reference. \\
 \hline
-\texttt{GeneratedFile} & \texttt{fileName} + generated C\# content for disk write. \\
+\texttt{GeneratedFile} & Target path under \texttt{GeneratedDI/} plus file body. \\
 \hline
-\texttt{RegistrationInsertTarget} & URI, \texttt{insertPosition}, indentation, human label (\texttt{CompositionRoot}, etc.). \\
+\texttt{RegistrationInsertTarget} & \texttt{uri}, \texttt{insertPosition}, \texttt{indent}, \texttt{label}. \\
 \hline
-\texttt{MARKER\_SERVICE\_INTERFACES} & Exclude \texttt{IDisposable}, \texttt{ICloneable}, \ldots{} from interface$\rightarrow$impl suggestions. \\
+\texttt{MARKER\_SERVICE\_INTERFACES} & Set excluding \texttt{IDisposable}, \texttt{ICloneable}, etc. from interface$\rightarrow$impl suggestions. \\
 \hline
-\texttt{DiCodeActionProvider} & Implements \texttt{provideCodeActions} for DI diagnostics. \\
+\texttt{DiCodeActionProvider} & \texttt{CodeActionProvider} for DI-related diagnostics. \\
 \hline
 \end{tabular}
 \end{table}
 
+\subsection{Implicit framework dependencies}
+
+Function \texttt{isImplicitFrameworkDependency(typeName)} returns true for types the .NET host registers without explicit application code, including \texttt{IServiceProvider}, \texttt{IServiceScopeFactory}, \texttt{IHostEnvironment}, \texttt{ILogger}, \texttt{IConfiguration}, and generic patterns \texttt{ILogger<}, \texttt{IOptions<}, \texttt{IOptionsSnapshot<}. This prevents workspace reports from listing hundreds of false missing types when factories inject \texttt{IServiceProvider}.
+
+\subsection{Non-injectable class detection}
+
+Classes whose base type matches \texttt{Profile}, \texttt{Migration}, \texttt{Controller}, \texttt{PageModel}, \texttt{DbContext} (when used as inheritance marker), etc., are added to \texttt{nonInjectableClassNames}. AutoMapper profiles and EF migrations should be discovered by assembly scanning, not registered as \texttt{AddScoped<Profile>}. MealPlanner contains many \texttt{Profile} subclasses; excluding them was required to avoid absurd registration suggestions.
+
 \section{Workspace aggregation algorithm}
 \label{chap4:workspace-algo}
 
-\texttt{buildWorkspaceSummary()} performs:
-\begin{enumerate}
-	\item Load up to 200 \texttt{.cs} files; skip unreadable paths.
-	\item Per file: run \texttt{analyzeCSharp}; merge constructors; extend \texttt{registeredTypes} via \texttt{collectExtendedRegistrationTypes}.
-	\item Detect \texttt{aspNetMvcHost} when \texttt{WebApplication.CreateBuilder} or \texttt{AddControllers*} appears.
-	\item Build \texttt{interfaceToImpl} via \texttt{collectInterfaceImplementations} (regex on \texttt{public class Impl : IFace}).
-	\item Mark \texttt{nonInjectableClassNames} for classes inheriting \texttt{Profile}, \texttt{Migration}, \texttt{Controller}, etc.
-	\item Record namespaces and \texttt{CompositionRoot} presence.
-\end{enumerate}
+\texttt{buildWorkspaceSummary()} is the computational core for all workspace commands. Pseudocode:
 
-\texttt{collectExtendedRegistrationTypes} extends plain \texttt{Add*} scanning with:
+\begin{algorithmic}[1]
+\State $files \gets$ find up to 200 \texttt{*.cs} excluding build folders
+\For{each $f \in files$}
+\State $analysis \gets \texttt{analyzeCSharp}(f.source)$ with try/catch
+\State merge $analysis.constructors$ with path metadata
+\State $registeredTypes.\texttt{addAll}(\texttt{collectExtendedRegistrationTypes}(f.source))$
+\State update $interfaceToImpl$, $typeToNamespace$, flags from regex
+\EndFor
+\State return \texttt{WorkspaceDiSummary}
+\end{algorithmic}
+
+\subsection{\texttt{collectExtendedRegistrationTypes}}
+
+This function extends plain \texttt{AddSingleton|Scoped|Transient<T>} scanning:
 \begin{itemize}
-	\item \texttt{AddDbContext<T>} $\rightarrow$ \texttt{T}, \texttt{DbContextOptions<T>};
-	\item \texttt{AddAutoMapper(...)} $\rightarrow$ \texttt{IMapper};
-	\item \texttt{AddIdentity<TUser,TRole>} / \texttt{AddIdentityCore<TUser>} $\rightarrow$ Identity managers;
-	\item \texttt{AddRoles}/\texttt{AddRoleManager} $\rightarrow$ \texttt{RoleManager<T>};
-	\item \texttt{typeof(I)} , \texttt{typeof(Impl)} pairs in \texttt{ServiceDescriptor} style registrations.
+	\item \texttt{AddDbContext<T>} registers \texttt{T} and \texttt{DbContextOptions<T>};
+	\item \texttt{AddAutoMapper(...)} registers \texttt{IMapper};
+	\item \texttt{AddIdentity<TUser,TRole>} and \texttt{AddIdentityCore<TUser>} register Identity managers and stores;
+	\item \texttt{AddRoles<T>} / role managers add \texttt{RoleManager<T>};
+	\item \texttt{typeof(IContract)}, \texttt{typeof(Impl)} pairs inside \texttt{new ServiceDescriptor(...)} (EventPlanner style).
+\end{itemize}
+
+MealPlanner validation (Section~\ref{chap5:mealplanner}) depended on this extension: without it, \texttt{IMapper} and Identity types appeared missing despite \texttt{AddAutoMapper} and \texttt{AddIdentity} calls.
+
+\subsection{Interface implementation map}
+
+\texttt{collectInterfaceImplementations} applies regex akin to \texttt{public class Impl : IFoo, IBar} and records \texttt{interfaceToImpl.set("IFoo", ["Impl"])}. Multiple implementations of the same interface append to the array; registration suggestion picks the first or prompts implicitly through ordering. Generic interfaces (\texttt{IBaseService<,>}) are partially supported via patterns in source.
+
+\subsection{Missing type computation (workspace)}
+
+For each constructor parameter type \(p\) in the aggregated list:
+\begin{itemize}
+	\item skip primitives and implicit framework types;
+	\item skip if \(p \in registeredTypes\);
+	\item skip if \(p\) is a non-injectable class name;
+	\item else report as missing for workspace analyze output and suggestion builders.
 \end{itemize}
 
 \section{Extension commands and workflows}
 \label{chap4:commands}
 
-Table~\ref{tab:commands} maps user commands to workflows.
+Table~\ref{tab:commands} lists palette commands from \texttt{package.json}. Two additional command IDs exist for code actions only.
 
 \begin{table}[htbp]
 \centering
 \caption{Contributed commands and workflows}
 \label{tab:commands}
 \small
-\begin{tabular}{|p{4.1cm}|p{8.6cm}|}
+\begin{tabular}{|p{3.8cm}|p{9cm}|}
 \hline
-\textbf{Command} & \textbf{Workflow} \\
+\textbf{Command ID} & \textbf{Workflow} \\
 \hline
-\texttt{analyzeFile} & Resolve active/visible C\# document $\rightarrow$ \texttt{analyzeCSharp} $\rightarrow$ Output report + refresh diagnostics. \\
+\texttt{di-plugin.analyzeFile} & Active editor C\# $\rightarrow$ \texttt{analyzeCSharp} $\rightarrow$ Output report; refresh diagnostics. \\
 \hline
-\texttt{suggestRegistrations} & File-scoped \texttt{buildRegistrationSuggestions} (interface pairs + concrete types). \\
+\texttt{di-plugin.suggestRegistrations} & Current file registration lines via \texttt{buildRegistrationSuggestions}. \\
 \hline
-\texttt{analyzeWorkspace} & \texttt{buildWorkspaceSummary} $\rightarrow$ list missing registrations (cross-file) and constructors by file. \\
+\texttt{di-plugin.analyzeWorkspace} & \texttt{buildWorkspaceSummary} $\rightarrow$ missing types, constructors grouped by file. \\
 \hline
-\texttt{suggestWorkspaceRegistrations} & \texttt{buildWorkspaceRegistrationSuggestions} with lifetime from composition root. \\
+\texttt{di-plugin.suggestWorkspaceRegistrations} & \texttt{buildWorkspaceRegistrationSuggestions} with \texttt{preferredLifetimeForWorkspace}. \\
 \hline
-\texttt{suggestFactories} & File-level factory snippets; fallback to workspace factory list if empty. \\
+\texttt{di-plugin.suggestFactories} & File factories; if empty, fallback workspace factory snippets. \\
 \hline
-\texttt{suggestWorkspaceFactories} & \texttt{buildWorkspaceFactorySuggestions} (factory \texttt{.cs} only, no \texttt{AppBuilder} dump). \\
+\texttt{di-plugin.suggestWorkspaceFactories} & \texttt{buildWorkspaceFactorySuggestions} --- factory \texttt{.cs} text only. \\
 \hline
-\texttt{generateWorkspaceFactories} & Write \texttt{GeneratedDI/*Factory.cs} + \texttt{AppBuilder.cs}. \\
+\texttt{di-plugin.generateWorkspaceFactories} & Write \texttt{GeneratedDI/*Factory.cs} + \texttt{AppBuilder.cs}. \\
 \hline
-\texttt{insertWorkspaceRegistrations} & Suggest lines $\rightarrow$ \texttt{insertRegistrationsIntoWorkspace}. \\
+\texttt{di-plugin.insertWorkspaceRegistrations} & Suggest then \texttt{insertRegistrationsIntoWorkspace}. \\
 \hline
-\texttt{mergeGeneratedIntoCompositionRoot} & Parse \texttt{GeneratedDI/AppBuilder.cs} $\rightarrow$ insert into composition root. \\
+\texttt{di-plugin.mergeGeneratedIntoCompositionRoot} & Parse \texttt{AppBuilder} registrations $\rightarrow$ insert into root. \\
 \hline
 \end{tabular}
 \end{table}
 
-\textbf{Internal commands} (not in palette, invoked from code actions): \texttt{insertRegistrationForType}, \texttt{extractInterfaceAndRegister}.
+\subsection{DI: Analyze current file}
 
-\subsection{Registration suggestion logic}
+\textbf{User goal:} understand constructor dependencies in the file being edited.
 
-\texttt{buildWorkspaceRegistrationSuggestions} emits:
+\textbf{Steps:} resolve active text editor; verify language C\#; call \texttt{analyzeCSharp}; format constructors with parameter lists; list concrete-type, cycle, and file-local missing issues; show errors including parse limit message.
+
+\textbf{Sample result:} On \texttt{CheckoutSample/Services.cs}, output lists \texttt{CheckoutCoordinator} with four interface parameters and \texttt{PaymentCaptureService} with two---establishing factory eligibility without workspace scan.
+
+\subsection{DI: Analyze workspace}
+
+\textbf{User goal:} solution-wide checklist of missing registrations and constructor inventory.
+
+\textbf{Steps:} \texttt{buildWorkspaceSummary}; diff constructor parameter types against \texttt{registeredTypes}; print grouped report to Output channel.
+
+\textbf{Sample result:} On \texttt{BuilderFactorySample}, reports missing \texttt{IEmailSender} and \texttt{OrderNotificationService} (or factory) relative to partial \texttt{CompositionRoot}.
+
+\subsection{DI: Suggest registrations (file and workspace)}
+
+\texttt{buildWorkspaceRegistrationSuggestions} emits lines:
 \begin{itemize}
-	\item \texttt{services.Add\{Lifetime\}<IInterface, Impl>()} for unregistered interface keys;
-	\item \texttt{services.Add\{Lifetime\}<Concrete>()} for classes with constructors that are not factory targets, not already registered, and not excluded by MVC/test/non-injectable rules.
+	\item \texttt{services.Add\{Lifetime\}<IInterface, Impl>()} for each unregistered interface key in \texttt{interfaceToImpl};
+	\item \texttt{services.Add\{Lifetime\}<Concrete>()} for concrete classes with constructors that are not factory targets, not registered, not excluded by MVC/test/non-injectable rules.
 \end{itemize}
 
-\texttt{preferredLifetimeForWorkspace} chooses \texttt{Scoped}, \texttt{Transient}, or \texttt{Singleton} from existing \texttt{services.Add*} usage in the composition root, else ASP.NET $\rightarrow$ Scoped, else Transient.
+\texttt{preferredLifetimeForWorkspace} algorithm:
+\begin{enumerate}
+	\item If composition root file exists, count \texttt{AddSingleton}, \texttt{AddScoped}, \texttt{AddTransient} occurrences; pick majority.
+	\item Else if \texttt{aspNetMvcHost}, default \texttt{Scoped}.
+	\item Else default \texttt{Transient} (console apps like BaseSample).
+\end{enumerate}
 
-\subsection{Factory generation logic}
+\textbf{Regression fix:} \texttt{buildRegistrationLineForMissingType} maps concrete \texttt{SmtpEmailSender} to \texttt{ISmtpEmailSender} pair when suggesting, avoiding duplicate ``already registered'' false negatives when interface form is required.
 
-\texttt{shouldGenerateFactory} requires:
+\subsection{DI: Suggest factories (file and workspace)}
+
+\texttt{shouldGenerateFactory(ctor, interfaceToImpl)}:
 \[
-|\text{parameters}| \geq 3 \quad \land \quad \forall p.\; \texttt{interfaceToImpl.has}(p.\text{type})
+|\text{params}| \geq 3 \quad \land \quad \forall p.\; \texttt{interfaceToImpl.has}(p.\text{type})
 \]
 
-\texttt{buildFactoryFileContent} emits a sealed class with \texttt{IServiceProvider} and \texttt{Create()} calling \texttt{GetRequiredService<T>()} for each dependency.
+\textbf{CheckoutSample:} \texttt{CheckoutCoordinator} qualifies; \texttt{PaymentCaptureService} fails on count.
+
+\textbf{MultiFactorySample:} \texttt{ImportPipeline} and \texttt{ExportPipeline} both qualify; \texttt{JobScheduler} fails.
+
+\texttt{buildWorkspaceFactorySuggestions} returns only sealed factory class templates with \texttt{Create()} calling \texttt{GetRequiredService<T>()} for each dependency---not the full AppBuilder.
+
+\subsection{DI: Generate builders/factories files (workspace)}
+
+Writes to \texttt{GeneratedDI/}:
+\begin{itemize}
+	\item one \texttt{*Factory.cs} per eligible class;
+	\item \texttt{AppBuilder.cs} static class with \texttt{Build()} method.
+\end{itemize}
 
 \texttt{buildAppBuilderFileContent} rules (refined):
 \begin{itemize}
-	\item Register \textbf{factory types only}, not the concrete service when a factory exists;
-	\item Include interface$\rightarrow$implementation lines required by factory dependencies even if already registered elsewhere (standalone \texttt{AppBuilder} completeness);
-	\item Skip marker interfaces and non-injectable classes.
+	\item register \textbf{factory types} for factory-backed services, not the concrete orchestrator type;
+	\item include interface$\rightarrow$implementation lines required by factory \texttt{Create()} even if already present in manual \texttt{CompositionRoot} (standalone checklist semantics);
+	\item skip marker interfaces and non-injectable classes;
+	\item add \texttt{using} statements from \texttt{typeToNamespace}.
 \end{itemize}
 
-\subsection{Registration insert module (\texttt{registrationInsert.ts})}
+\textbf{MultiFactorySample committed output} registers \texttt{ImportPipelineFactory} and \texttt{ExportPipelineFactory} plus dependency interfaces---documented in Chapter~\ref{chap5:multifactory}.
 
-\texttt{findRegistrationInsertTarget} priority:
+\subsection{DI: Insert workspace registrations}
+
+Pipeline: \texttt{buildWorkspaceRegistrationSuggestions} $\rightarrow$ \texttt{findRegistrationInsertTarget} $\rightarrow$ \texttt{filterNewRegistrationLines} $\rightarrow$ \texttt{WorkspaceEdit.insert} at computed position $\rightarrow$ \texttt{applyEdit}.
+
+User sees success notification with target label (\texttt{CompositionRoot}, etc.).
+
+\subsection{DI: Merge GeneratedDI into CompositionRoot}
+
+Reads \texttt{GeneratedDI/AppBuilder.cs}, extracts \texttt{services.Add*} lines via line-by-line parser (\texttt{parseRegistrationsFromAppBuilder}), deduplicates against existing root content, inserts using same anchor as insert command.
+
+\textbf{Regression:} early regex failed on \texttt{AddScoped<T>()} without interface pair; line-based parser fixed merge for BuilderFactorySample.
+
+\subsection{Internal commands (code actions)}
+
+\texttt{di-plugin.insertRegistrationForType} --- triggered from lightbulb on missing-registration diagnostic; passes type name argument.
+
+\texttt{di-plugin.extractInterfaceAndRegister} --- runs \texttt{extractInterface.ts} workflow then inserts registration.
+
+\section{Registration insert module (\texttt{registrationInsert.ts})}
+\label{chap4:registration-insert}
+
+\subsection{Purpose}
+
+Encapsulates brittle text-editing rules so \texttt{extension.ts} does not duplicate position logic across insert and merge.
+
+\subsection{\texttt{findRegistrationInsertTarget}}
+
+Priority order:
 \begin{enumerate}
-	\item File containing \texttt{class CompositionRoot};
-	\item \texttt{public static IServiceCollection Add*Services(...)};
-	\item \texttt{void ConfigureServices(IServiceCollection services)}.
+	\item file containing \texttt{class CompositionRoot};
+	\item \texttt{public static IServiceCollection Add*Services(this IServiceCollection ...)};
+	\item \texttt{void ConfigureServices(IServiceCollection services)} in startup style.
 \end{enumerate}
 
-Insertion occurs at the \textbf{start of the line} containing \texttt{return services.BuildServiceProvider()} (or \texttt{return services;}), preserving indentation. \texttt{filterNewRegistrationLines} avoids duplicate substrings in normalized source.
+Within the target file, search backward from \texttt{return services.BuildServiceProvider()} or \texttt{return services;}. Insert position is \textbf{start of that line's} zero-based offset, not the \texttt{return} token offset---preventing corrupted lines such as \texttt{re services.Add...turn}.
 
-\subsection{Extract interface module (\texttt{extractInterface.ts})}
+\subsection{\texttt{filterNewRegistrationLines}}
 
-Workflow for \texttt{extractInterfaceAndRegister}:
+Normalizes whitespace and rejects lines whose substantive content already appears in the target file, reducing duplicate \texttt{AddScoped} on repeated merge.
+
+\subsection{\texttt{parseRegistrationsFromAppBuilder}}
+
+Splits \texttt{AppBuilder.cs} into lines; keeps lines matching \texttt{services.Add(Singleton|Scoped|Transient)}. Supports one-type-parameter and two-type-parameter generic forms.
+
+\section{Extract interface module (\texttt{extractInterface.ts})}
+\label{chap4:extract-interface}
+
+\subsection{Workflow}
+
+For concrete parameter type \texttt{SmtpEmailSender} in consumer class:
 \begin{enumerate}
-	\item Derive \texttt{I\{Concrete\}} name; locate implementation file.
-	\item Create interface file in \texttt{Interfaces/} folder if present, else beside implementation.
-	\item Append interface to class bases; replace constructor parameter type in consumer class.
-	\item Insert \texttt{services.AddScoped<I, Concrete>()} via \texttt{insertRegistrationsIntoWorkspace}.
+	\item derive interface name \texttt{ISmtpEmailSender} (prefix \texttt{I} + concrete name, or user convention);
+	\item locate implementation file defining \texttt{SmtpEmailSender};
+	\item create interface file under \texttt{Interfaces/} if that folder exists in workspace, else adjacent to implementation;
+	\item add interface to class base list on implementation;
+	\item replace parameter type in consumer constructor with interface;
+	\item call \texttt{insertRegistrationsIntoWorkspace} with \texttt{AddScoped<ISmtpEmailSender, SmtpEmailSender>()}.
 \end{enumerate}
+
+\subsection{Limitations}
+
+Generated interfaces are \textbf{empty}---members are not copied from implementation. Developer must move method signatures manually. This is acceptable for thesis prototype scope but noted in evaluation threats.
 
 \section{Diagnostics and quick fixes}
 \label{chap4:diagnostics}
 
-\texttt{analyzeCSharpDocument} maps analyzer output to \texttt{Diagnostic} entries (source \texttt{di-plugin}):
+\texttt{analyzeCSharpDocument(document)} clears and repopulates the diagnostic collection. Source attribute \texttt{di-plugin} groups entries in Problems panel.
+
+\texttt{DiCodeActionProvider.provideCodeActions} returns actions when diagnostics match:
 \begin{itemize}
-	\item Information/hint on constructors with dependency lists;
-	\item Warning on concrete types, cycles, file-local missing registrations;
-	\item File-level parse limit warnings at range \texttt{(0,0)}.
+	\item \textbf{Insert registration} --- local \texttt{ConfigureServices} when file matches startup pattern; else command to workspace insert with type argument;
+	\item \textbf{Register interface} --- suggest \texttt{Add*<I, Concrete>} when \texttt{interfaceToImpl} has mapping;
+	\item \textbf{Extract interface and register} --- full \texttt{extractInterfaceAndRegister} for concrete-type issues.
 \end{itemize}
 
-\texttt{DiCodeActionProvider} offers:
-\begin{itemize}
-	\item local \texttt{ConfigureServices} insert when pattern matches;
-	\item workspace insert command for missing types;
-	\item register \texttt{I*} $\rightarrow$ concrete or full extract-interface workflow.
-\end{itemize}
+Code actions use \texttt{Command} with \texttt{arguments} rather than immediate \texttt{WorkspaceEdit} in provider, so execution happens after user selection with proper undo stack.
 
 \section{Heuristics and design decisions}
 \label{chap4:heuristics}
 
 \begin{itemize}
-	\item \textbf{Regex + AST hybrid:} AST for constructors; regex for registrations and inheritance (pragmatic for ASP.NET extension methods).
-	\item \textbf{Marker interfaces excluded:} \texttt{IDisposable} on \texttt{UnitOfWork} must not produce \texttt{AddScoped<IDisposable, ...>}.
-	\item \textbf{Non-injectable bases:} AutoMapper \texttt{Profile}, EF \texttt{Migration}, MVC controllers excluded from concrete registration suggestions.
-	\item \textbf{Implicit framework services:} \texttt{IServiceProvider}, \texttt{ILogger<T>}, \texttt{IOptions<T>}, etc. excluded from workspace missing-registration reports.
-	\item \textbf{Factory vs.\ registration separation:} reduces duplicate output between command categories (user-facing clarity).
+	\item \textbf{Regex + AST hybrid} --- AST for constructors; regex for registrations and inheritance (pragmatic for ASP.NET extension methods scattered in large files).
+	\item \textbf{Marker interfaces excluded} --- \texttt{IDisposable} on \texttt{UnitOfWork} must not produce \texttt{AddScoped<IDisposable, UnitOfWork>}.
+	\item \textbf{Factory vs.\ registration UX split} --- reduces duplicate output; documented in README command table.
+	\item \textbf{200-file cap} --- protects against freezing VS Code on accidental open of huge monorepos; trade-off documented.
+	\item \textbf{Interface naming convention} --- \texttt{I + PascalCase} required for \texttt{collectInterfaceImplementations}; deviations are missed.
 \end{itemize}
 
 \section{Known limitations}
 \label{chap4:limitations}
 
 \begin{itemize}
-	\item \textbf{200-file workspace cap} may truncate very large solutions.
-	\item \textbf{Interface detection} requires \texttt{I[A-Z]} prefix on base types; custom naming (\texttt{Abstractions.IEmail}) is missed.
-	\item \textbf{Extract interface} creates empty interfaces; members are not copied from implementation.
-	\item \textbf{Lifetime inference} is majority-vote on existing lines, not architecture-aware.
-	\item \textbf{Merge/suggest} may still propose \texttt{JobScheduler}-style simple services while factories target complex ones---by design.
-	\item \textbf{No undo grouping} for multi-file extract-interface edits beyond VS Code default \texttt{WorkspaceEdit} behavior.
-	\item Commands \texttt{insertRegistrationForType} and \texttt{extractInterfaceAndRegister} are not listed in \texttt{package.json} contributes (palette) but are valid command IDs for code actions.
+	\item Workspace cap may omit files in solutions with more than 200 application \texttt{.cs} files.
+	\item Lifetime inference is majority-vote, not architecture-aware (singleton cache in scoped service mistakes possible).
+	\item Extract interface produces empty interfaces.
+	\item \texttt{insertRegistrationForType} and \texttt{extractInterfaceAndRegister} are not in \texttt{package.json} contributes menu---only code actions.
+	\item Generated \texttt{AppBuilder} may duplicate manual root until user regenerates after rule changes.
+	\item No grouped undo title across multi-file extract beyond default VS Code behavior.
 \end{itemize}
+
+\subsection{Composition root excerpt (BuilderFactorySample)}
+
+The partial wiring below (from \texttt{CompositionRoot.cs}) is intentional test input: the plugin must propose missing \texttt{IEmailSender} and notification/factory registration without duplicating existing lines.
+
+\begin{lstlisting}[caption={Partial CompositionRoot (test input)}]
+services.AddScoped<ILogger, ConsoleLogger>();
+services.AddScoped<IClock, SystemClock>();
+services.AddScoped<ITemplateEngine, BasicTemplateEngine>();
+// Missing: IEmailSender, OrderNotificationService / factory
+return services.BuildServiceProvider();
+\end{lstlisting}
+
+After \textbf{DI: Insert workspace registrations} and optional merge from \texttt{GeneratedDI/AppBuilder.cs}, the root should contain additional \texttt{AddScoped} lines immediately above the \texttt{return}, with indentation matching the surrounding method body.
+
+\subsection{Command interaction diagram}
+
+Workspace commands are not independent pipelines: they share \texttt{buildWorkspaceSummary()}. Figure~\ref{fig:command-deps} shows dependencies. Any improvement to \texttt{collectExtendedRegistrationTypes} benefits analyze, suggest, insert, merge, and generate alike.
+
+\begin{figure}[htbp]
+\centering
+\fbox{\parbox{0.9\textwidth}{
+\small
+\texttt{buildWorkspaceSummary} $\rightarrow$ \texttt{analyzeWorkspace}\\
+$\rightarrow$ \texttt{suggestWorkspaceRegistrations} $\rightarrow$ \texttt{insertWorkspaceRegistrations}\\
+$\rightarrow$ \texttt{suggestWorkspaceFactories} $\rightarrow$ \texttt{generateWorkspaceFactories}\\
+$\rightarrow$ \texttt{mergeGeneratedIntoCompositionRoot}
+}}
+\caption{Shared workspace summary across commands}
+\label{fig:command-deps}
+\end{figure}
+
+The host module ties analyzer capabilities to user-visible outcomes validated sample-by-sample in Chapter~\ref{chap5:evaluation}.
