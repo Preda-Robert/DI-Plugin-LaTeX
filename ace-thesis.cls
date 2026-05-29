@@ -36,7 +36,19 @@
 \usepackage{longtable}
 \usepackage{lipsum}
 \usepackage{fancyhdr}
+\usepackage{graphicx}
 \usepackage{listings}
+
+% Placeholder frame for thesis figures (replace with \includegraphics{...})
+\newcommand{\thesisfigureplaceholder}[2]{%
+	\fbox{\begin{minipage}{0.92\textwidth}\centering
+	\vspace{1.8cm}
+	\textbf{[Figure placeholder]}\\[0.5em]
+	\textit{#1}\\[0.8em]
+	\small #2
+	\vspace{1.8cm}
+	\end{minipage}}%
+}
 \lstset{
 	basicstyle=\ttfamily\footnotesize,
 	breaklines=true,

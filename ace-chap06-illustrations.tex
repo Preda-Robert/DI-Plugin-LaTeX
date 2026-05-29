@@ -1,0 +1,166 @@
+\selectlanguage{english}
+\chapter[Illustrations]{Illustrations, diagrams, and screenshot guide}
+\label{chap6:illustrations}
+
+This chapter lists \textbf{recommended figures} for the thesis. Placeholders appear in the PDF until you replace them with \verb|\includegraphics| (files under \texttt{DI-Plugin-LaTeX/img/thesis/} suggested). Each entry states \emph{what to capture}, \emph{where in the thesis it is referenced}, and \emph{why it helps the reader}.
+
+\section{How to insert your assets}
+
+\begin{enumerate}
+	\item Export PNG or PDF at 300\,dpi; width 12--14\,cm in print.
+	\item Save as \texttt{img/thesis/fig-NN-shortname.png}.
+	\item Replace \verb|\thesisfigureplaceholder{...}| with:
+\begin{verbatim}
+\includegraphics[width=0.95\textwidth]{img/thesis/fig-01-architecture}
+\end{verbatim}
+	\item Keep \verb|\caption| and \verb|\label| unchanged so cross-references work.
+\end{enumerate}
+
+\section{Architecture and technology figures}
+
+\begin{figure}[htbp]
+\centering
+\thesisfigureplaceholder{Figure 6.1: VS Code extension architecture}%
+{Three boxes: ``C\# workspace (.cs files)'', ``Node.js extension host (TypeScript: extension.ts, analyzer.ts)'', ``VS Code UI (Problems, Output, Command Palette)''. Arrows: files $\rightarrow$ host $\rightarrow$ UI. Optional fourth box: ``tree-sitter native parser'' inside host.}
+\caption{High-level architecture: C\# sources analyzed inside the TypeScript extension host (recommended diagram tool: draw.io, Lucidchart, or PowerPoint).}
+\label{fig:vscode-arch}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\thesisfigureplaceholder{Figure 6.2: Workspace analysis pipeline}%
+{Flowchart matching Chapter~\ref{chap2:pipeline}: Discovery $\rightarrow$ Per-file parse $\rightarrow$ Regex passes $\rightarrow$ Aggregation $\rightarrow$ Commands/Edits. Highlight 32\,KiB skip branch to ``regex only''.}
+\caption{Workspace analysis pipeline (flowchart).}
+\label{fig:pipeline-flowchart}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\thesisfigureplaceholder{Figure 6.3: tree-sitter syntax tree (schematic)}%
+{Tree rooted at \texttt{compilation\_unit}, child \texttt{class\_declaration} ``CheckoutCoordinator'', child \texttt{constructor\_declaration}, children \texttt{parameter\_list} with four \texttt{parameter} nodes. Label \texttt{childForFieldName("type")} on one parameter.}
+\caption{Schematic syntax tree for a multi-parameter constructor (Chapter~\ref{chap3:treesitter-api}).}
+\label{fig:parse-tree}
+\end{figure}
+
+\section{VS Code UI screenshots}
+
+Capture these with the \textbf{Extension Development Host} window (F5), sample folder open as workspace root, theme of your choice (consistent across all shots).
+
+\begin{figure}[htbp]
+\centering
+\thesisfigureplaceholder{Screenshot 6.4: Command Palette}%
+{Open CheckoutSample workspace. Ctrl+Shift+P, type ``DI:''. Show all commands from DI Plugin (Analyze workspace, Suggest registrations, Suggest factories, Generate, Insert, Merge).}
+\caption{Command Palette listing DI Plugin commands (\texttt{CheckoutSample} workspace).}
+\label{fig:command-palette}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\thesisfigureplaceholder{Screenshot 6.5: Problems panel --- constructor information}%
+{Open \texttt{CheckoutSample/Services.cs}. Problems panel shows Information diagnostic on \texttt{CheckoutCoordinator} listing four interface dependencies.}
+\caption{Constructor dependency diagnostic (Information severity).}
+\label{fig:problems-constructor}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\thesisfigureplaceholder{Screenshot 6.6: Problems panel --- concrete-type warning}%
+{Open \texttt{BuilderFactorySample/Services.cs}. Warning on \texttt{SmtpEmailSender} parameter in \texttt{ConcreteMailerService}.}
+\caption{Concrete-type DI smell warning with underline on parameter type.}
+\label{fig:problems-concrete}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\thesisfigureplaceholder{Screenshot 6.7: Lightbulb quick fix}%
+{Same file as Fig.~\ref{fig:problems-concrete}. Cursor on warning; lightbulb menu showing ``Extract interface and register'' or ``Insert registration''.}
+\caption{Code action (lightbulb) quick fixes for DI diagnostics.}
+\label{fig:quick-fix}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\thesisfigureplaceholder{Screenshot 6.8: Output channel --- Analyze workspace}%
+{Run ``DI: Analyze workspace'' on BuilderFactorySample. Output channel ``DI Plugin'' lists missing \texttt{IEmailSender} / services and constructors by file.}
+\caption{Workspace analyze report in Output channel.}
+\label{fig:output-analyze}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\thesisfigureplaceholder{Screenshot 6.9: Output channel --- Suggest factories}%
+{Run ``DI: Suggest factories for workspace'' on MultiFactorySample. Show \texttt{ImportPipelineFactory} and \texttt{ExportPipelineFactory} snippets without full AppBuilder dump.}
+\caption{Factory suggestion output (factory-only command).}
+\label{fig:output-factories}
+\end{figure}
+
+\section{Sample-specific evidence screenshots}
+
+\begin{figure}[htbp]
+\centering
+\thesisfigureplaceholder{Screenshot 6.10: GeneratedDI folder}%
+{Explorer sidebar: \texttt{MultiFactorySample/GeneratedDI/} with \texttt{ImportPipelineFactory.cs}, \texttt{ExportPipelineFactory.cs}, \texttt{AppBuilder.cs} after Generate command.}
+\caption{Generated artifacts under \texttt{GeneratedDI/} (MultiFactorySample).}
+\label{fig:explorer-generated}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\thesisfigureplaceholder{Screenshot 6.11: CompositionRoot after merge}%
+{Split editor: \texttt{CompositionRoot.cs} with new \texttt{services.AddScoped} lines above \texttt{return services.BuildServiceProvider();} intact on one line.}
+\caption{Composition root after ``Merge GeneratedDI'' (insertion above \texttt{return}).}
+\label{fig:merge-result}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\thesisfigureplaceholder{Screenshot 6.12: MealPlanner --- parse limit diagnostic}%
+{Open \texttt{DataContextModelSnapshot.cs}. Problems: warning at line 1 about parse character limit; confirm other commands still work.}
+\caption{Parse guard diagnostic on oversized EF snapshot (MealPlanner).}
+\label{fig:mealplanner-parse-limit}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\thesisfigureplaceholder{Screenshot 6.13: MealPlanner --- clean workspace analyze}%
+{Run Analyze workspace on MealPlanner root. Output should \textbf{not} list \texttt{IMapper} or \texttt{IServiceProvider} as missing (post-fix validation).}
+\caption{Workspace analyze on MealPlanner without framework false positives.}
+\label{fig:mealplanner-analyze}
+\end{figure}
+
+\section{Optional comparison figure}
+
+\begin{figure}[htbp]
+\centering
+\thesisfigureplaceholder{Figure 6.14: Roslyn vs.\ tree-sitter trade-off table (visual)}%
+{Optional: bar chart or matrix --- Accuracy (Roslyn high), Deployability in VS Code extension (tree-sitter high), Cross-file symbols (Roslyn yes).}
+\caption{Optional visual summary of technology choice (Table~\ref{tab:roslyn-vs-ts} in Chapter~\ref{chap3:analyzer}).}
+\label{fig:roslyn-comparison}
+\end{figure}
+
+\section{Mapping figures to thesis chapters}
+
+Table~\ref{tab:figure-map} helps ensure every major chapter has visual support.
+
+\begin{table}[htbp]
+\centering
+\caption{Recommended figures per chapter}
+\label{tab:figure-map}
+\begin{tabular}{|l|l|}
+\hline
+\textbf{Chapter} & \textbf{Suggested figures} \\
+\hline
+Introduction & Fig.~\ref{fig:vscode-arch} (overview) \\
+\hline
+Architecture & Fig.~\ref{fig:vscode-arch}, Fig.~\ref{fig:pipeline-flowchart} \\
+\hline
+Analyzer & Fig.~\ref{fig:parse-tree} \\
+\hline
+Extension host & Fig.~\ref{fig:command-palette}, Fig.~\ref{fig:problems-constructor}, Fig.~\ref{fig:quick-fix} \\
+\hline
+Evaluation & Fig.~\ref{fig:output-analyze}, Fig.~\ref{fig:output-factories}, Fig.~\ref{fig:explorer-generated}, Fig.~\ref{fig:merge-result}, MealPlanner pair \\
+\hline
+\end{tabular}
+\end{table}
+
+Including 10--12 of the above figures typically adds 8--12 pages to a thesis after captions and spacing, helping reach the 50-page target without filler text.

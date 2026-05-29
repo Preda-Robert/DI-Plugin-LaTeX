@@ -73,7 +73,7 @@ The analyzer exports \texttt{CSharpDiAnalysis}, the per-file counterpart consume
 \section{Processing pipeline}
 \label{chap2:pipeline}
 
-Figure~\ref{fig:pipeline} summarizes the end-to-end pipeline for workspace-level features. Each stage is idempotent: re-running a command rebuilds the summary from current disk content rather than caching stale ASTs between commands (simplicity over incremental performance).
+Figure~\ref{fig:pipeline} summarizes the end-to-end pipeline for workspace-level features; a full-page flowchart variant is recommended as Figure~\ref{fig:pipeline-flowchart} in Chapter~\ref{chap6:illustrations}. Each stage is idempotent: re-running a command rebuilds the summary from current disk content rather than caching stale ASTs between commands (simplicity over incremental performance).
 
 \begin{figure}[htbp]
 \centering
@@ -101,29 +101,68 @@ Separately from workspace commands, opening or editing a C\# document triggers \
 
 This path must remain lightweight because it runs on every keystroke debounced by VS Code's diagnostic request scheduling.
 
+\section{Why TypeScript for a C\# tool}
+\label{chap2:typescript}
+
+Although the analyzed language is C\#, the entire extension---host, analyzer wrapper, and edit helpers---is implemented in \textbf{TypeScript}. This is not an accident of convenience: it follows directly from how Visual Studio Code extensions are authored and from the deployment constraints of editor-integrated tooling.
+
+\subsection{VS Code extension host mandates JavaScript/TypeScript}
+
+The VS Code extension host executes extension code in a \textbf{Node.js} process separate from the UI renderer. Microsoft documents the Extension API for TypeScript and JavaScript; there is no supported path to load a C\# assembly as the extension entry point. Any tool that appears inside VS Code as commands, diagnostics, and code actions must therefore ship as JavaScript (typically compiled from TypeScript for static typing). A C\#-implemented analyzer would require either:
+\begin{itemize}
+	\item a \textbf{separate process} (Language Server Protocol server) communicating over JSON-RPC, with packaging and lifecycle complexity; or
+	\item a \textbf{Roslyn analyzer} distributed as NuGet, which integrates with MSBuild and Visual Studio but not natively with VS Code palette commands without an additional bridge.
+\end{itemize}
+
+For a thesis prototype focused on editor UX, TypeScript in-process with the extension host minimizes moving parts: one repository, one \texttt{npm run compile}, one \texttt{F5} debug session.
+
+\subsection{Type safety across module boundaries}
+
+TypeScript interfaces (\texttt{CSharpDiAnalysis}, \texttt{WorkspaceDiSummary}, \texttt{ConstructorParam}) document contracts between \texttt{analyzer.ts} and \texttt{extension.ts}. The compiler catches refactors such as renaming \texttt{parameters} vs.\ \texttt{params} before runtime. For a multi-module extension where the host maps tree-sitter byte offsets to VS Code \texttt{Range} objects, explicit types reduce subtle off-by-one bugs.
+
+The project uses strict compiler options typical of VS Code extensions (\texttt{strict}, \texttt{noImplicitAny} where enabled in \texttt{tsconfig.json}). Exported types from the analyzer can be imported by future unit tests in Node without loading VS Code mocks.
+
+\subsection{Ecosystem alignment: tree-sitter Node bindings}
+
+The chosen parser, tree-sitter, exposes a first-class \textbf{Node.js native addon} (\texttt{tree-sitter} on npm). Grammar packages such as \texttt{tree-sitter-c-sharp} export a language object consumed by \texttt{Parser.setLanguage}. A C\#-centric stack would instead use Roslyn (\texttt{Microsoft.CodeAnalysis}), which is powerful but heavy to embed inside a Node extension process. TypeScript therefore sits at the natural intersection: editor API in JS, parser binding in JS, C\# only as \emph{data} (source strings).
+
+\subsection{Asynchronous workspace I/O}
+
+Workspace commands use \texttt{async}/\texttt{await} with VS Code APIs (\texttt{workspace.fs.readFile}, \texttt{findFiles}, \texttt{applyEdit}). TypeScript's async syntax maps cleanly onto these promises. Blocking the extension host thread on large directory scans would freeze UI; the host reads files sequentially with try/catch per file so one failure does not abort the batch.
+
+\subsection{Trade-offs acknowledged}
+
+TypeScript cannot reflect C\# semantics at compile time: type names extracted from syntax trees are \textbf{strings}, not symbols. The team accepts false positives/negatives documented in later chapters in exchange for deployability. Alternatives (F\# script, Rust WASM parser) would increase build complexity without changing the fundamental requirement that the Extension API consumer lives in the Node host.
+
+Figure~\ref{fig:vscode-arch} (Chapter~\ref{chap6:illustrations}) shows the recommended diagram of this split: C\# sources on disk, TypeScript extension process, Problems panel output.
+
 \section{Technology stack and integration points}
 \label{chap2:tech}
 
 \subsection{Runtime and build}
 
-The extension is authored in TypeScript, compiled to JavaScript under \texttt{out/}, and packaged per VS Code extension guidelines. Native module \texttt{tree-sitter} binds to a platform-specific binary; packaging must include prebuilds or instruct developers to rebuild for their architecture.
+The extension is authored in TypeScript, compiled to JavaScript under \texttt{out/}, and packaged per VS Code extension guidelines. The manifest (\texttt{package.json}) declares \texttt{main}: \texttt{./out/extension.js}, engine \texttt{vscode}: \texttt{^1.85.0}, and activation \texttt{onLanguage:csharp}. Native module \texttt{tree-sitter} binds to a platform-specific binary; packaging must include prebuilds or instruct developers to rebuild for their architecture when publishing to multiple OS targets.
 
 \subsection{Parsing stack}
 
 \texttt{tree-sitter} provides incremental parsing infrastructure; \texttt{tree-sitter-c-sharp} supplies the grammar. The analyzer holds a module-level \texttt{Parser} instance with language set once at load time. Parse trees are not retained between calls---each analysis parses from scratch, which simplifies memory management at the cost of repeated work.
 
-\subsection{Editor API surface}
+\subsection{Editor API surface (overview)}
 
-The host uses:
+The host uses the VS Code Extension API~\cite{vscode-api}; Chapter~\ref{chap4:extension} documents each call site. At architecture level, the API families are:
 \begin{itemize}
-	\item \texttt{vscode.commands.registerCommand} for palette actions;
-	\item \texttt{vscode.languages.createDiagnosticCollection} for Problems panel integration;
-	\item \texttt{vscode.languages.registerCodeActionsProvider} for lightbulb quick fixes;
-	\item \texttt{vscode.workspace.applyEdit} and \texttt{vscode.workspace.fs.writeFile} for mutations;
-	\item \texttt{vscode.window.createOutputChannel} for human-readable reports.
+	\item \textbf{Commands} --- \texttt{commands.registerCommand} exposes palette actions; \texttt{executeCommand} is used from code actions for deferred edits.
+	\item \textbf{Languages} --- \texttt{languages.createDiagnosticCollection}, \texttt{registerCodeActionsProvider}, and document selectors (\texttt{\{ language: 'csharp' \}}).
+	\item \textbf{Workspace} --- \texttt{workspace.findFiles}, \texttt{fs.readFile}, \texttt{applyEdit}, \texttt{getConfiguration} (future settings).
+	\item \textbf{Window} --- \texttt{createOutputChannel}, \texttt{showInformationMessage}, \texttt{activeTextEditor}.
+	\item \textbf{Positioning} --- \texttt{Position}, \texttt{Range}, \texttt{Selection} bridge tree-sitter indices to squiggles.
 \end{itemize}
 
-Activation occurs on \texttt{onLanguage:csharp}. Subscriptions include \texttt{onDidOpenTextDocument}, \texttt{onDidChangeTextDocument}, and \texttt{onDidCloseTextDocument} filtered to C\# language ID.
+Activation occurs on \texttt{onLanguage:csharp}. Subscriptions are pushed to \texttt{context.subscriptions} so disposal is automatic on deactivate. Document listeners include \texttt{onDidOpenTextDocument}, \texttt{onDidChangeTextDocument}, and \texttt{onDidCloseTextDocument} filtered to C\# language ID.
+
+\subsection{Dependency manifest (npm)}
+
+Runtime npm dependencies include \texttt{tree-sitter}, \texttt{tree-sitter-c-sharp}, and \texttt{@types/vscode} (development). No \texttt{Microsoft.CodeAnalysis} packages appear in \texttt{package.json}, reinforcing the syntactic-analysis architecture decision.
 
 \section{Design principles}
 \label{chap2:design}

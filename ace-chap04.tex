@@ -16,7 +16,7 @@ The host module is intentionally large because it encodes domain heuristics spec
 	\item \texttt{extractInterface.ts} --- multi-file \texttt{WorkspaceEdit} for concrete-parameter quick fixes.
 \end{itemize}
 
-This chapter documents host data structures, the workspace aggregation algorithm, each contributed command workflow, diagnostic and code-action behavior, design heuristics, and limitations. Empirical outcomes appear in Chapter~\ref{chap5:evaluation}.
+This chapter documents host data structures, the workspace aggregation algorithm, each contributed command workflow, the VS Code Extension API mapping (Section~\ref{chap4:vscode-api}), diagnostic and code-action behavior, design heuristics, and limitations. Empirical outcomes appear in Chapter~\ref{chap5:evaluation}; screenshot guidance appears in Chapter~\ref{chap6:illustrations}.
 
 \section{Key data structures and interfaces}
 \label{chap4:data-structures}
@@ -256,6 +256,62 @@ For concrete parameter type \texttt{SmtpEmailSender} in consumer class:
 \subsection{Limitations}
 
 Generated interfaces are \textbf{empty}---members are not copied from implementation. Developer must move method signatures manually. This is acceptable for thesis prototype scope but noted in evaluation threats.
+
+\section{VS Code Extension API usage in detail}
+\label{chap4:vscode-api}
+
+This section documents how the host maps architectural responsibilities onto concrete Extension API types~\cite{vscode-api}. Understanding these mappings explains activation behavior and suggests where screenshots should be taken for the thesis (Chapter~\ref{chap6:illustrations}).
+
+\subsection{Activation and subscriptions}
+
+\texttt{activate(context: vscode.ExtensionContext)} registers all listeners. Each subscription is pushed to \texttt{context.subscriptions} so VS Code disposes them when the extension unloads. \texttt{deactivate()} clears the diagnostic collection explicitly. Activation event \texttt{onLanguage:csharp} delays loading until a C\# file exists, reducing startup cost in non-.NET workspaces.
+
+\subsection{Document and workspace events}
+
+\begin{itemize}
+	\item \texttt{workspace.onDidOpenTextDocument} / \texttt{onDidChangeTextDocument} --- if \texttt{document.languageId === 'csharp'}, call \texttt{analyzeCSharpDocument} to refresh diagnostics.
+	\item \texttt{workspace.onDidCloseTextDocument} --- remove diagnostics for closed URI to avoid stale entries.
+	\item \texttt{workspace.findFiles(include, exclude, maxResults)} --- workspace scan with glob \texttt{**/*.cs} and exclusion of \texttt{**/bin/**}, \texttt{**/obj/**}; \texttt{maxResults = 200}.
+	\item \texttt{workspace.fs.readFile(uri)} --- returns \texttt{Uint8Array} decoded to string for analysis; failures skip file silently.
+\end{itemize}
+
+\subsection{Diagnostics API}
+
+\texttt{languages.createDiagnosticCollection('di-plugin')} returns a mutable collection keyed by document URI. Each \texttt{Diagnostic} includes:
+\begin{itemize}
+	\item \texttt{range}: \texttt{new vscode.Range(startLine, startChar, endLine, endChar)} from constructor/param indices;
+	\item \texttt{message}: human-readable dependency list or issue description;
+	\item \texttt{severity}: \texttt{DiagnosticSeverity.Information} for constructor info, \texttt{Warning} for smells;
+	\item \texttt{source}: \texttt{'di-plugin'} groups entries in Problems panel.
+\end{itemize}
+
+Parse-limit errors use range \texttt{(0,0)} at document start so the user sees why AST features are disabled for EF snapshots.
+
+\subsection{Commands API}
+
+\texttt{commands.registerCommand('di-plugin.analyzeWorkspace', async () => ...)} binds palette titles from \texttt{package.json} \texttt{contributes.commands}. Commands are async functions: they await file reads and \texttt{applyEdit}. Internal commands (\texttt{insertRegistrationForType}) accept \texttt{typeName} via \texttt{args} from code actions.
+
+\subsection{Code actions API}
+
+\texttt{languages.registerCodeActionsProvider} with \texttt{DiCodeActionProvider} implements \texttt{provideCodeActions(document, range, context)}. It inspects \texttt{context.diagnostics} filtered by \texttt{source === 'di-plugin'} and returns \texttt{CodeAction} objects with \texttt{kind: QuickFix} and \texttt{command} property (title + command id + arguments). Using commands rather than inline \texttt{WorkspaceEdit} in the provider ensures a single undo step and consistent error handling in the command handler.
+
+\subsection{Workspace edit and file system API}
+
+\texttt{insertRegistrationsIntoWorkspace} builds \texttt{WorkspaceEdit}:
+\begin{itemize}
+	\item \texttt{edit.insert(uri, position, text)} --- inserts registration lines at composition-root anchor;
+	\item \texttt{workspace.applyEdit(edit)} --- applies atomically; returns boolean success.
+\end{itemize}
+
+\texttt{generateWorkspaceFactories} uses \texttt{workspace.fs.writeFile(uri, Buffer.from(content))} to create \texttt{GeneratedDI/} files. Directory creation uses \texttt{workspace.fs.createDirectory} when missing.
+
+\subsection{Window and output API}
+
+\texttt{window.createOutputChannel('DI Plugin')} receives append-only reports from analyze/suggest commands---useful when Problems panel diagnostics are insufficient (full workspace listing). \texttt{window.showInformationMessage} confirms successful insert/merge with composition-root label.
+
+\subsection{Position conversion helper (conceptual)}
+
+The host maps tree-sitter \texttt{startIndex} to \texttt{document.positionAt(offset)} when available, which accounts for UTF-16 in VS Code documents. This bridge is the critical link between the analyzer chapter and editor UX; misalignment would show squiggles on wrong tokens.
 
 \section{Diagnostics and quick fixes}
 \label{chap4:diagnostics}

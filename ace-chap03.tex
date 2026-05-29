@@ -61,6 +61,83 @@ parser.setLanguage(CSharp);
 
 Reusing the parser avoids reloading the grammar per call. Parse trees are local variables discarded after \texttt{analyzeCSharp} returns.
 
+\section{tree-sitter API surface used by the analyzer}
+\label{chap3:treesitter-api}
+
+The npm package \texttt{tree-sitter} exposes a small imperative API around an incremental GLR-style parser~\cite{tree-sitter}. The DI Plugin uses only the subset required to walk C\# \texttt{class\_declaration} and \texttt{constructor\_declaration} nodes. Table~\ref{tab:treesitter-api} maps each API element to its role in \texttt{analyzer.ts}.
+
+\begin{table}[htbp]
+\centering
+\caption{tree-sitter APIs consumed by \texttt{analyzer.ts}}
+\label{tab:treesitter-api}
+\small
+\begin{tabular}{|p{3.6cm}|p{9.8cm}|}
+\hline
+\textbf{API} & \textbf{Purpose in DI Plugin} \\
+\hline
+\texttt{new Parser()} & Module-singleton parser instance reused for every \texttt{analyzeCSharp} call. \\
+\hline
+\texttt{parser.setLanguage(CSharp)} & Attaches the \texttt{tree-sitter-c-sharp} grammar compiled to a \texttt{Language} object; required before \texttt{parse}. \\
+\hline
+\texttt{parser.parse(source)} & Builds a \texttt{Tree} from the full source string; returns \texttt{Parser.Tree}. Throws or rejects on native errors (caught; 32\,KiB guard prevents \texttt{EINVAL}). \\
+\hline
+\texttt{tree.rootNode} & Entry node (\texttt{compilation\_unit} or equivalent); starting point for queries. \\
+\hline
+\texttt{rootNode.hasError()} & When true, grammar recovered from syntax errors; analyzer appends warning but continues traversal. \\
+\hline
+\texttt{SyntaxNode.type} & String grammar symbol (e.g.\ \texttt{class\_declaration}, \texttt{parameter}); drives filtering. \\
+\hline
+\texttt{SyntaxNode.startIndex}, \texttt{endIndex} & Byte offsets into \texttt{source}; copied to \texttt{ConstructorParam} and used by host for \texttt{Range}. \\
+\hline
+\texttt{SyntaxNode.childCount}, \texttt{child(i)} & Manual tree walk fallback when typed helpers unavailable. \\
+\hline
+\texttt{SyntaxNode.namedChildCount}, \texttt{namedChild(j)} & Preferred for \texttt{parameter\_list} children to skip punctuation nodes \texttt{(}, \texttt{,}. \\
+\hline
+\texttt{SyntaxNode.children} & Array used in \texttt{findTypeOfParameter} fallback search. \\
+\hline
+\texttt{SyntaxNode.childForFieldName(name)} & Grammar-field access: \texttt{"name"}, \texttt{"type"}, \texttt{"parameters"} per tree-sitter field labels in C\# grammar. \\
+\hline
+\texttt{SyntaxNode.descendantsOfType(type)} & Efficient collection of all nodes matching a type under a subtree (classes, constructors, interfaces). \\
+\hline
+\texttt{source.slice(start, end)} & Application code (\texttt{getText}) turns node spans into type names and identifiers. \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Grammar package \texttt{tree-sitter-c-sharp}}
+
+Import \texttt{import CSharp from "tree-sitter-c-sharp"} supplies the precompiled grammar. The grammar defines which \texttt{node.type} strings appear in trees. The analyzer hard-codes stable type names such as:
+\begin{itemize}
+	\item \texttt{class\_declaration}, \texttt{interface\_declaration};
+	\item \texttt{constructor\_declaration};
+	\item \texttt{parameter\_list}, \texttt{parameter}, \texttt{\_parameter\_array};
+	\item leaf types \texttt{identifier}, \texttt{generic\_name}, \texttt{nullable\_type}, \texttt{predefined\_type}, \texttt{array\_type}.
+\end{itemize}
+
+If the grammar package updates node names, \texttt{nodeTypeMatches} also checks optional \texttt{grammarType} for forward compatibility.
+
+\subsection{Why \texttt{childForFieldName} matters}
+
+Unlike naive text parsing, tree-sitter grammars assign \textbf{field names} to children (documented in \texttt{grammar.js} of the language repo). Example: a \texttt{parameter} node exposes \texttt{childForFieldName("type")} and \texttt{childForFieldName("name")}. The analyzer prefers fields over positional \texttt{child(i)} because punctuation and modifiers vary.
+
+When the \texttt{type} field is absent (older grammar or unusual syntax), \texttt{findTypeOfParameter} scans children before the \texttt{name} node's \texttt{startIndex} for identifier-like types---a defensive heuristic preserving robustness on edge-case parameters.
+
+\subsection{Why \texttt{descendantsOfType} matters}
+
+Nested classes, regions, and namespaces can bury a \texttt{constructor\_declaration} deep in the tree. Calling \texttt{classNode.descendantsOfType("constructor\_declaration")} returns all constructors declared lexically inside a class body without manual recursion errors. The same API on \texttt{rootNode} collects all \texttt{class\_declaration} nodes for interface/class sets.
+
+A manual \texttt{collectDescendants} fallback exists because some tree-sitter versions expose \texttt{descendantsOfType} only on certain node classes; the dual path prevents empty constructor lists on older bindings.
+
+\subsection{Indices: bytes vs.\ VS Code UTF-16}
+
+tree-sitter reports \texttt{startIndex}/\texttt{endIndex} as \textbf{byte offsets} into the UTF-8 source buffer passed to \texttt{parse}. VS Code document positions use UTF-16 code units. For ASCII-only identifiers in sample projects, byte and UTF-16 columns coincide; internationalized identifiers may require conversion in future host code. The thesis samples intentionally use ASCII type names to avoid mismatch during evaluation.
+
+\subsection{APIs deliberately not used}
+
+The DI Plugin does \textbf{not} use tree-sitter's incremental \texttt{parse(oldTree, edits)} API, query DSL (\texttt{tree-sitter-query}), or WASM build. Every analysis is a full re-parse---acceptable for files under 32\,KiB and simplifies correctness when the user edits registration lines between keystrokes. It also does not use \texttt{Tree.walk()} visitor API; TypeScript loops over \texttt{descendantsOfType} results are sufficient.
+
+Figure~\ref{fig:parse-tree} in Chapter~\ref{chap6:illustrations} should depict a collapsed syntax tree for \texttt{CheckoutCoordinator}'s constructor with labeled node types---either exported from tree-sitter CLI or drawn schematically.
+
 \subsection{Comparison to workspace-level types}
 
 \texttt{ConstructorInfo} in the analyzer lacks \texttt{fileName}; the host attaches path metadata when merging into \texttt{WorkspaceDiSummary}. Issue types in the analyzer are file-local; the host may suppress or reinterpret them when presenting workspace reports (e.g.\ framework types).
@@ -228,6 +305,37 @@ Tree-sitter indices enable precise squiggles. The host converts to VS Code \text
 	\item \textbf{Parse error nodes} --- \texttt{hasError} yields generic warning; no error-node recovery strategy.
 	\item \textbf{No async/disposal analysis} --- \texttt{IAsyncDisposable} and \texttt{IDisposable} marker interfaces are not special-cased in the analyzer (host excludes markers from registration suggestions).
 \end{itemize}
+
+\section{Grammar node types referenced in code}
+\label{chap3:node-types}
+
+Table~\ref{tab:grammar-nodes} catalogs C\# grammar node \texttt{type} strings the analyzer matches. These names come from \texttt{tree-sitter-c-sharp} and appear in the Inspector or query output when debugging parse trees.
+
+\begin{table}[htbp]
+\centering
+\caption{C\# grammar node types used in \texttt{analyzer.ts}}
+\label{tab:grammar-nodes}
+\small
+\begin{tabular}{|l|p{10cm}|}
+\hline
+\textbf{Node type} & \textbf{Role} \\
+\hline
+\texttt{class\_declaration} & Extract class name; scope for constructors. \\
+\hline
+\texttt{interface\_declaration} & Build in-file interface set for concrete-type check. \\
+\hline
+\texttt{constructor\_declaration} & Extract parameter list span. \\
+\hline
+\texttt{parameter\_list} & Container for parameters. \\
+\hline
+\texttt{parameter}, \texttt{\_parameter\_array} & Single parameter; type/name fields. \\
+\hline
+\texttt{identifier}, \texttt{generic\_name} & Type and name text via \texttt{getText}. \\
+\hline
+\texttt{nullable\_type}, \texttt{predefined\_type}, \texttt{array\_type} & Alternate type shapes in \texttt{findTypeOfParameter}. \\
+\hline
+\end{tabular}
+\end{table}
 
 \section{Worked example: \texttt{CheckoutCoordinator}}
 \label{chap3:worked-example}

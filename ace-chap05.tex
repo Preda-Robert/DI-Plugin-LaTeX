@@ -20,6 +20,8 @@ This chapter records:
 
 The evaluation does not claim statistical coverage of all C\# programs; it demonstrates \emph{representative} behaviors that a thesis reader can replicate by installing the extension and opening the same folders.
 
+Figures in Chapter~\ref{chap6:illustrations} provide visual evidence for the procedures below; the author should replace placeholders with screenshots taken during replication.
+
 \section{Test environment and procedure}
 \label{chap5:environment}
 
@@ -384,6 +386,39 @@ public sealed class CheckoutCoordinatorFactory
 \end{lstlisting}
 
 Manual verification confirmed that \texttt{Create()} lists exactly the four interface types from the source constructor and that \texttt{PaymentCaptureService} never receives an analogous class in suggest-factory output.
+
+\section{Implementation patterns validated by samples}
+\label{chap5:patterns}
+
+The samples double as \textbf{living specifications} for heuristics. The following patterns are stable in the repository and unlikely to change without an explicit version bump; thesis text can reference them safely.
+
+\subsection{Factory eligibility pattern}
+
+All factory-positive classes share the same constructor shape: three or four parameters, each typed as an interface that appears in \texttt{interfaceToImpl} because an \texttt{public class X : IY} declaration exists in the same workspace. \texttt{OrderNotificationService}, \texttt{CheckoutCoordinator}, \texttt{ImportPipeline}, and \texttt{ExportPipeline} follow this pattern. Negative controls (\texttt{PaymentCaptureService}, \texttt{JobScheduler}) intentionally use two parameters to test the threshold boundary.
+
+\subsection{Partial composition root pattern}
+
+\texttt{BuilderFactorySample} and \texttt{CheckoutSample} use incomplete \texttt{CompositionRoot} files:
+
+\begin{lstlisting}[caption={Intentional gap in BuilderFactorySample (stable test input)}]
+services.AddScoped<ITemplateEngine, BasicTemplateEngine>();
+// Missing on purpose: IEmailSender and OrderNotificationService
+return services.BuildServiceProvider();
+\end{lstlisting}
+
+The plugin must always propose the missing interface bindings while not duplicating the three lines already present---exercising \texttt{filterNewRegistrationLines} and lifetime detection (\texttt{Scoped}).
+
+\subsection{Concrete dependency smell pattern}
+
+\texttt{ConcreteMailerService(SmtpEmailSender smtp)} in BuilderFactorySample is the canonical concrete-type smell. It will remain in the sample unless the repository README is rewritten; it validates analyzer \texttt{concreteTypeIssues} and extract-interface workflow.
+
+\subsection{Multi-factory workspace pattern}
+
+MultiFactorySample proves that \texttt{buildWorkspaceFactorySuggestions} iterates \emph{all} constructors in \texttt{WorkspaceDiSummary}, not only the first match. Expected file count after generate: two \texttt{*Factory.cs} files plus one \texttt{AppBuilder.cs}. Committed \texttt{AppBuilder} registers factories without registering \texttt{ImportPipeline}/\texttt{ExportPipeline} concretes when factory-only rules apply---compare with Fig.~\ref{fig:explorer-generated}.
+
+\subsection{ASP.NET extension-method pattern (MealPlanner)}
+
+MealPlanner's \texttt{AddApplicationServices} registers dozens of \texttt{AddScoped} pairs and calls \texttt{services.AddAutoMapper(...)}. The plugin must treat \texttt{IMapper} as satisfied without an explicit \texttt{AddScoped<IMapper, ...>} line. This pattern is representative of production APIs and justifies \texttt{collectExtendedRegistrationTypes} remaining in the host rather than the analyzer.
 
 \section{Threats to validity and future automated testing}
 \label{chap5:threats}
